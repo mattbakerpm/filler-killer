@@ -1,0 +1,45 @@
+{
+  "_comment": "Word fillers/phrases counted from normal transcription. Multi-word phrases are matched as sequences. Edit here or via the in-app gear (settings) button. Longer phrases are matched before shorter ones automatically.",
+  "fillers": [
+    "you know what i mean",
+    "you know",
+    "i mean",
+    "kind of",
+    "sort of",
+    "or something",
+    "like",
+    "actually",
+    "basically",
+    "literally",
+    "right"
+  ],
+  "_comment_acoustic": "Filled pauses (um/uh) are caught by a separate grammar-constrained acoustic pass, because normal transcription autocorrects them into real words. Each entry must be a single word the model knows. Adding more (e.g. 'hmm') increases false-positive risk.",
+  "acoustic_fillers": [
+    "um",
+    "uh"
+  ],
+  "_comment_display": "Which fillers appear in the overlay breakdown. Empty [] = show ALL of them (acoustic + word fillers); the window sizes itself to fit.",
+  "display_priority": [],
+  "mic_device": null,
+  "_comment_mic": "null = system default input. Pick a device in the in-app settings, or run `./run.sh --list-devices`.",
+  "monologue": {
+    "_comment": "Warn when you've been talking continuously too long. mode: off | short | medium. A 2s silence gap resets the clock.",
+    "mode": "medium",
+    "short_seconds": 30,
+    "medium_seconds": 90
+  },
+  "graph": {
+    "_comment": "Timeline graph: fillers per interval, bars compress so the whole call stays visible.",
+    "bucket_seconds": 30
+  },
+  "window": {
+    "x": 40,
+    "y": 80,
+    "opacity": 0.92,
+    "always_on_top": true
+  },
+  "alert": {
+    "flash_on_filler": true,
+    "rate_window_seconds": 60
+  }
+}

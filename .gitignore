@@ -1,0 +1,17 @@
+# virtualenv and Python artifacts
+.venv/
+__pycache__/
+*.pyc
+
+# Vosk model (downloaded by setup.sh, ~40MB)
+model/
+model*.zip
+
+# built app bundle (rebuild with ./make_app.sh)
+FillerCoach.app/
+
+# macOS
+.DS_Store
+
+# local task board (not part of the open-source project)
+BACKLOG.json

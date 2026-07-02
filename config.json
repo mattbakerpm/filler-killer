@@ -18,12 +18,10 @@
     "um",
     "uh"
   ],
-  "_comment_display": "Which fillers appear in the overlay breakdown. Empty [] = show ALL of them (acoustic + word fillers); the window sizes itself to fit.",
-  "display_priority": [],
   "mic_device": null,
   "_comment_mic": "null = system default input. Pick a device in the in-app settings, or run `./run.sh --list-devices`.",
   "monologue": {
-    "_comment": "Warn when you've been talking continuously too long. mode: off | short | medium. A 2s silence gap resets the clock.",
+    "_comment": "Airtime guard: warn when you've been talking continuously too long. mode: off | short | medium. A 2s silence gap resets the clock; turns under 3s don't count in stats.",
     "mode": "medium",
     "short_seconds": 30,
     "medium_seconds": 90
@@ -35,7 +33,7 @@
   "window": {
     "x": 40,
     "y": 80,
-    "opacity": 0.92,
+    "opacity": 0.97,
     "always_on_top": true
   },
   "alert": {

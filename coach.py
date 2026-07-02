@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import re
+import statistics
 import threading
 import time
 
@@ -80,6 +81,43 @@ def count_fillers(tokens, matchers):
 
 
 # --------------------------------------------------------------------------
+# Scoring
+# --------------------------------------------------------------------------
+SCORE_MIN_WORDS = 30      # need this many spoken words before scoring
+BURST_WINDOW = 15.0       # fillers within this many seconds count as a burst
+
+
+def compute_score(words, filler_times, long_turns, airtime_scored):
+    """
+    0–100 composite speaking score, or None if too few words yet.
+
+    - density (weight .5): fillers per 100 spoken words. 100 pts at <=0.5,
+      0 pts at >=8.
+    - spread (weight .2): fraction of fillers that follow another filler
+      within BURST_WINDOW seconds — clustered slips read worse than isolated
+      ones. 0% bursty = 100 pts.
+    - airtime (weight .3): long uninterrupted turns. -15 pts each.
+      Excluded (weights renormalized) when the airtime warning is off.
+    """
+    if words < SCORE_MIN_WORDS:
+        return None
+    density = len(filler_times) / words * 100.0
+    density_score = max(0.0, min(100.0, (8.0 - density) / 7.5 * 100.0))
+    if len(filler_times) >= 2:
+        ts = sorted(filler_times)
+        bursts = sum(1 for a, b in zip(ts, ts[1:]) if b - a <= BURST_WINDOW)
+        burst_score = 100.0 * (1.0 - bursts / (len(ts) - 1))
+    else:
+        burst_score = 100.0
+    if airtime_scored:
+        airtime_score = max(0.0, 100.0 - 15.0 * long_turns)
+        score = 0.5 * density_score + 0.2 * burst_score + 0.3 * airtime_score
+    else:
+        score = (0.5 * density_score + 0.2 * burst_score) / 0.7
+    return int(round(score))
+
+
+# --------------------------------------------------------------------------
 # Dual-pass recognition
 #
 # Pass 1 (word pass): normal Vosk decoding catches word fillers ("you know",
@@ -105,8 +143,10 @@ def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False):
         if text:
             if echo:
                 print(f"heard: {text}", flush=True)
+            toks = normalize(text)
             out.put(("speech",))
-            counts = count_fillers(normalize(text), matchers)
+            out.put(("words", len(toks)))
+            counts = count_fillers(toks, matchers)
             # um/uh style fillers are counted by the acoustic pass; drop them
             # here in case a model ever does emit them (avoids double count)
             counts = {k: v for k, v in counts.items() if k not in ac_set}
@@ -210,10 +250,14 @@ def input_devices():
     return devs
 
 
-MONOLOGUE_GAP = 2.0  # seconds of silence that ends a "continuous talking" run
+# --------------------------------------------------------------------------
+# Airtime (talking-turn) tracking
+# --------------------------------------------------------------------------
+AIRTIME_GAP = 2.0    # seconds of silence that ends a talking turn
+MIN_TURN = 3.0       # ignore shorter turns ("yeah", "mm-hmm") in stats
 
 
-def monologue_limit(cfg):
+def airtime_limit(cfg):
     """Seconds allowed of continuous talking, or None if the warning is off."""
     mono = cfg.get("monologue", {})
     mode = mono.get("mode", "off")
@@ -222,6 +266,11 @@ def monologue_limit(cfg):
     if mode == "medium":
         return float(mono.get("medium_seconds", 90))
     return None
+
+
+def fmt_mmss(seconds):
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
 
 
 # --------------------------------------------------------------------------
@@ -245,9 +294,7 @@ def run_overlay(config, echo=False, dock=False):
     def rgb(r, g, b, a=1.0):
         return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
 
-    BG = rgb(0.067, 0.075, 0.102, 0.95)
-    BG_FLASH = rgb(1.0, 0.36, 0.42, 0.97)     # filler flash (red)
-    BG_MONO = rgb(0.30, 0.22, 0.06, 0.97)     # monologue pulse (amber-dark)
+    BG = rgb(0.067, 0.075, 0.102, 0.98)
     FG = rgb(0.91, 0.925, 0.96)
     DIM = rgb(0.486, 0.522, 0.596)
     OK = rgb(0.306, 0.788, 0.541)
@@ -260,21 +307,10 @@ def run_overlay(config, echo=False, dock=False):
     GRAPH_H = 44
 
     class BGView(NSView):
-        def initWithFrame_(self, frame):
-            self = objc.super(BGView, self).initWithFrame_(frame)
-            if self:
-                self._bg = BG
-            return self
-
-        def setBG_(self, color):
-            if color is not self._bg:
-                self._bg = color
-                self.setNeedsDisplay_(True)
-
         def drawRect_(self, rect):
             path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 self.bounds(), 16.0, 16.0)
-            self._bg.setFill()
+            BG.setFill()
             path.fill()
 
     class GraphView(NSView):
@@ -291,7 +327,6 @@ def run_overlay(config, echo=False, dock=False):
         def drawRect_(self, rect):
             b = self.bounds()
             w, h = b.size.width, b.size.height
-            # baseline
             DIM.colorWithAlphaComponent_(0.35).setFill()
             NSBezierPath.fillRect_(NSMakeRect(0, 0, w, 1))
             n = len(self.buckets)
@@ -300,12 +335,10 @@ def run_overlay(config, echo=False, dock=False):
             gap = 1.0 if (w / n) >= 3 else 0.0
             bw = min(10.0, (w - gap * (n - 1)) / n)
             maxc = max(4, max(self.buckets))
-            # thresholds consistent with the rate label: green <4/min, amber <8
             per_min = 60.0 / max(1, self.bucket_seconds)
             for i, c in enumerate(self.buckets):
                 x = i * (bw + gap)
                 if c <= 0:
-                    # tick mark so elapsed empty intervals are visible
                     DIM.colorWithAlphaComponent_(0.25).setFill()
                     NSBezierPath.fillRect_(NSMakeRect(x, 1, max(1.0, bw), 2))
                     continue
@@ -337,8 +370,8 @@ def run_overlay(config, echo=False, dock=False):
         parent.addSubview_(f)
         return f
 
-    def button(parent, x, y, w, title, target, action):
-        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, 26))
+    def button(parent, x, y, w, title, target, action, h=26):
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         b.setTitle_(title)
         b.setBezelStyle_(NSBezelStyleRounded)
         b.setTarget_(target)
@@ -352,16 +385,24 @@ def run_overlay(config, echo=False, dock=False):
             self.cfg = cfg
             self.counts = {}
             self.total = 0
-            self.events = []          # real timestamps, for rate/min
+            self.words_total = 0
+            self.events = []            # recent timestamps, for rate/min
+            self.filler_times = []      # all timestamps, for burstiness
+            self.turns = []             # completed talking-turn durations
+            self.long_turns = 0
+            self.run_flagged = False
             self.paused = False
-            self.elapsed_accum = 0.0  # active seconds before the current run
+            self.expanded = False
+            self.elapsed_accum = 0.0
             self.active_since = time.time()
             self.flash_until = 0.0
+            self.flash_color = AMBER
             self.last_speech = 0.0
             self.speech_start = None
             self.q = queue.Queue()
             self.settings_win = None
             self.panel = None
+            self.graph = None
             self._build_window()
             self._start_listener()
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -378,12 +419,14 @@ def run_overlay(config, echo=False, dock=False):
             return self.elapsed_accum + (time.time() - self.active_since)
 
         @objc.python_method
-        def display_list(self):
-            pri = [d.strip().lower() for d in self.cfg.get("display_priority", [])]
-            if pri:
-                return pri
+        def all_phrases(self):
             return (list(self.cfg.get("acoustic_fillers", [])) +
                     [f.strip().lower() for f in self.cfg.get("fillers", [])])
+
+        @objc.python_method
+        def sorted_counts(self):
+            return sorted(self.all_phrases(),
+                          key=lambda p: (-self.counts.get(p, 0), p))
 
         @objc.python_method
         def _start_listener(self):
@@ -397,12 +440,19 @@ def run_overlay(config, echo=False, dock=False):
         # ---- main window ----
         @objc.python_method
         def _build_window(self):
+            # preserve the top-left corner across rebuilds (accordion toggles)
             if self.panel is not None:
+                f = self.panel.frame()
+                origin_x, top = f.origin.x, f.origin.y + f.size.height
                 self.panel.orderOut_(None)
-            win = self.cfg.get("window", {})
-            rows = self.display_list()
+            else:
+                win = self.cfg.get("window", {})
+                origin_x = int(win.get("x", 40))
+                top = None  # resolved after we know screen height
+
+            rows = self.sorted_counts() if self.expanded else []
             H = (10 + 16 + 2 + 54 + 14 + 6 + 16 + 16 + 6 +
-                 len(rows) * ROW_H + 4 + GRAPH_H + 8 + 26 + 12)
+                 GRAPH_H + 6 + 18 + len(rows) * ROW_H + 8 + 26 + 12)
 
             style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
             panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -417,13 +467,12 @@ def run_overlay(config, echo=False, dock=False):
             panel.setMovableByWindowBackground_(True)
             panel.setBecomesKeyOnlyIfNeeded_(True)
             try:
-                panel.setAlphaValue_(float(win.get("opacity", 0.92)))
+                panel.setAlphaValue_(float(self.cfg.get("window", {}).get("opacity", 0.97)))
             except Exception:
                 pass
 
             view = BGView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
             panel.setContentView_(view)
-            self.bgview = view
 
             y = H - 10
             # header
@@ -436,38 +485,50 @@ def run_overlay(config, echo=False, dock=False):
             gear.setTarget_(self)
             gear.setAction_(b"openSettings:")
             view.addSubview_(gear)
-            # big total
+            # big row: total (left) + score (right)
             y -= 2 + 54
-            self.total_lbl = label(view, PAD - 2, y, W - 28, 54, 44, FG,
+            self.total_lbl = label(view, PAD - 2, y, 120, 54, 44, FG,
                                    weight_bold=True, text=str(self.total))
+            self.score_lbl = label(view, W - 130, y, 114, 54, 44, DIM,
+                                   weight_bold=True, align_right=True, text="—")
             y -= 14
-            label(view, PAD, y, 200, 14, 10, DIM, text="fillers this session")
+            label(view, PAD, y, 120, 14, 10, DIM, text="fillers")
+            label(view, W - 130, y, 114, 14, 10, DIM, align_right=True, text="score")
             # rate + timer
             y -= 6 + 16
             self.rate_lbl = label(view, PAD, y, 120, 16, 12, OK, mono=True, text="0.0 / min")
             self.timer_lbl = label(view, W - 90, y, 74, 16, 12, DIM, mono=True,
                                    align_right=True, text="00:00")
-            # monologue line
+            # airtime stats / warning line
             y -= 16
-            self.mono_lbl = label(view, PAD, y, W - 2 * PAD, 16, 11, DIM, mono=True, text="")
-            # breakdown
-            y -= 6
-            self.break_lbls = {}
-            for phrase in rows:
-                y -= ROW_H
-                label(view, PAD, y, 170, 16, 11, DIM, text=f"“{phrase}”")
-                cnt = label(view, W - 70, y, 54, 16, 11, FG, mono=True,
-                            align_right=True, text=str(self.counts.get(phrase, 0)))
-                self.break_lbls[phrase] = cnt
-            # graph
-            y -= 4 + GRAPH_H
+            self.air_lbl = label(view, PAD, y, W - 2 * PAD, 16, 11, DIM, mono=True, text="")
+            # graph (above the words)
+            y -= 6 + GRAPH_H
             gv = GraphView.alloc().initWithFrame_(
                 NSMakeRect(PAD, y, W - 2 * PAD, GRAPH_H))
             gv.bucket_seconds = int(self.cfg.get("graph", {}).get("bucket_seconds", 30))
-            if getattr(self, "graph", None) is not None:
-                gv.buckets = self.graph.buckets   # keep history across rebuilds
+            if self.graph is not None:
+                gv.buckets = self.graph.buckets
             view.addSubview_(gv)
             self.graph = gv
+            # words accordion
+            y -= 6 + 18
+            acc = NSButton.alloc().initWithFrame_(NSMakeRect(PAD - 6, y, W - 2 * PAD + 6, 18))
+            acc.setBordered_(False)
+            acc.setTarget_(self)
+            acc.setAction_(b"toggleWords:")
+            acc.setFont_(NSFont.systemFontOfSize_(11))
+            acc.setAlignment_(0)
+            view.addSubview_(acc)
+            self.acc_btn = acc
+            self.row_lbls = []
+            for phrase in rows:
+                y -= ROW_H
+                name = label(view, PAD, y, 170, 16, 11, DIM, text="")
+                cnt = label(view, W - 70, y, 54, 16, 11, FG, mono=True,
+                            align_right=True, text="")
+                self.row_lbls.append((name, cnt))
+            self._refresh_words()
             # buttons
             y -= 8 + 26
             bw = (W - 2 * PAD - 16) // 3
@@ -477,13 +538,26 @@ def run_overlay(config, echo=False, dock=False):
             button(view, PAD + bw + 8, y, bw, "Reset", self, b"reset:")
             button(view, PAD + 2 * (bw + 8), y, bw, "Quit", self, b"quit:")
 
-            x = int(win.get("x", 40))
-            y0 = int(win.get("y", 80))
-            screen = panel.screen()
-            sh = screen.frame().size.height if screen else 900
-            panel.setFrameOrigin_((x, sh - y0 - H))
+            if top is None:
+                screen = panel.screen()
+                sh = screen.frame().size.height if screen else 900
+                top = sh - int(self.cfg.get("window", {}).get("y", 80))
+            panel.setFrameOrigin_((origin_x, top - H))
             panel.orderFrontRegardless()
             self.panel = panel
+
+        @objc.python_method
+        def _refresh_words(self):
+            ordered = self.sorted_counts()
+            arrow = "▾" if self.expanded else "▸"
+            title = f"{arrow} words"
+            top = [p for p in ordered if self.counts.get(p, 0) > 0][:1]
+            if not self.expanded and top:
+                title += f"  ·  top “{top[0]}” ×{self.counts[top[0]]}"
+            self.acc_btn.setTitle_(title)
+            for (name, cnt), phrase in zip(self.row_lbls, ordered):
+                name.setStringValue_(f"“{phrase}”")
+                cnt.setStringValue_(str(self.counts.get(phrase, 0)))
 
         # ---- timers ----
         def poll_(self, timer):
@@ -502,15 +576,26 @@ def run_overlay(config, echo=False, dock=False):
                         continue
                     elif kind == "final":
                         self._apply(evt[1])
+                    elif kind == "words":
+                        self.words_total += evt[1]
                     elif kind == "partial":
                         if evt[1] and self.cfg.get("alert", {}).get("flash_on_filler", True):
-                            self.flash_until = now + 0.4
+                            self._set_flash(now, 0.3)
                     elif kind == "speech":
-                        if now - self.last_speech > MONOLOGUE_GAP:
+                        if now - self.last_speech > AIRTIME_GAP:
                             self.speech_start = now
+                            self.run_flagged = False
                         self.last_speech = now
             except queue.Empty:
                 pass
+
+        @objc.python_method
+        def _set_flash(self, now, dur):
+            rw = self.cfg.get("alert", {}).get("rate_window_seconds", 60)
+            recent = [t for t in self.events if t >= now - rw]
+            rate = len(recent) * (60.0 / max(1.0, min(rw, max(1.0, self.active_time()))))
+            self.flash_color = ACCENT if rate >= 8 else AMBER
+            self.flash_until = now + dur
 
         @objc.python_method
         def _apply(self, counts):
@@ -522,12 +607,12 @@ def run_overlay(config, echo=False, dock=False):
                 self.counts[phrase] = self.counts.get(phrase, 0) + c
                 added += c
                 self.events.extend([now] * c)
+                self.filler_times.extend([now] * c)
             self.total += added
             self.total_lbl.setStringValue_(str(self.total))
             if self.cfg.get("alert", {}).get("flash_on_filler", True):
-                self.flash_until = now + 0.5
-            for phrase, lbl in self.break_lbls.items():
-                lbl.setStringValue_(str(self.counts.get(phrase, 0)))
+                self._set_flash(now, 0.5)
+            self._refresh_words()
             # graph
             idx = int(self.active_time() // max(1, self.graph.bucket_seconds))
             while len(self.graph.buckets) <= idx:
@@ -540,7 +625,7 @@ def run_overlay(config, echo=False, dock=False):
             active = self.active_time()
             self.timer_lbl.setStringValue_(
                 ("⏸ " if self.paused else "") + f"{int(active) // 60:02d}:{int(active) % 60:02d}")
-            # rate over trailing window (real time)
+            # rate over trailing window
             rw = self.cfg.get("alert", {}).get("rate_window_seconds", 60)
             self.events = [t for t in self.events if t >= now - rw]
             span = min(rw, max(1.0, active)) if active > 0 else rw
@@ -554,35 +639,66 @@ def run_overlay(config, echo=False, dock=False):
                     while len(self.graph.buckets) <= idx:
                         self.graph.buckets.append(0)
                     self.graph.setNeedsDisplay_(True)
-            # monologue
-            bg = BG
-            limit = monologue_limit(self.cfg)
+            # airtime turn tracking
+            limit = airtime_limit(self.cfg)
+            stat_limit = limit or float(self.cfg.get("monologue", {}).get("medium_seconds", 90))
             talking = (not self.paused and self.speech_start is not None
-                       and now - self.last_speech <= MONOLOGUE_GAP)
-            if not talking:
-                self.speech_start = None
-            if limit and talking:
+                       and now - self.last_speech <= AIRTIME_GAP)
+            if not talking and self.speech_start is not None:
+                self._end_turn()
+            if talking:
                 talk = now - self.speech_start
-                mmss = f"{int(talk) // 60}:{int(talk) % 60:02d}"
-                if talk >= limit:
-                    self.mono_lbl.setStringValue_(f"◼ MONOLOGUE {mmss} — wrap it up")
-                    self.mono_lbl.setTextColor_(ACCENT)
-                    if int(now * 2) % 2 == 0:
-                        bg = BG_MONO
-                elif talk >= 0.6 * limit:
-                    self.mono_lbl.setStringValue_(f"talking {mmss}")
-                    self.mono_lbl.setTextColor_(AMBER)
+                if talk >= stat_limit and not self.run_flagged:
+                    self.long_turns += 1
+                    self.run_flagged = True
+                if limit and talk >= limit:
+                    self.air_lbl.setStringValue_(f"◼ WRAP IT UP · {fmt_mmss(talk)}")
+                    self.air_lbl.setTextColor_(ACCENT)
+                elif limit and talk >= 0.6 * limit:
+                    self.air_lbl.setStringValue_(f"talking {fmt_mmss(talk)}")
+                    self.air_lbl.setTextColor_(AMBER)
                 else:
-                    self.mono_lbl.setStringValue_("")
+                    self._show_air_stats()
             else:
-                self.mono_lbl.setStringValue_("⏸ paused" if self.paused else "")
-                self.mono_lbl.setTextColor_(DIM)
-            # filler flash wins over monologue pulse
-            if now < self.flash_until:
-                bg = BG_FLASH
-            self.bgview.setBG_(bg)
+                self._show_air_stats()
+            # score
+            score = compute_score(self.words_total, self.filler_times,
+                                  self.long_turns, limit is not None)
+            if score is None:
+                self.score_lbl.setStringValue_("—")
+                self.score_lbl.setTextColor_(DIM)
+            else:
+                self.score_lbl.setStringValue_(str(score))
+                self.score_lbl.setTextColor_(
+                    OK if score >= 85 else AMBER if score >= 65 else ACCENT)
+            # number flash (background never changes)
+            self.total_lbl.setTextColor_(
+                self.flash_color if now < self.flash_until else FG)
+
+        @objc.python_method
+        def _end_turn(self):
+            dur = self.last_speech - self.speech_start
+            if dur >= MIN_TURN:
+                self.turns.append(dur)
+            self.speech_start = None
+            self.run_flagged = False
+
+        @objc.python_method
+        def _show_air_stats(self):
+            if self.paused:
+                self.air_lbl.setStringValue_("⏸ paused")
+                self.air_lbl.setTextColor_(DIM)
+                return
+            med = fmt_mmss(statistics.median(self.turns)) if self.turns else "—"
+            self.air_lbl.setStringValue_(
+                f"turns {len(self.turns)} · median {med} · long {self.long_turns}")
+            self.air_lbl.setTextColor_(AMBER if self.long_turns else DIM)
 
         # ---- actions ----
+        def toggleWords_(self, sender):
+            self.expanded = not self.expanded
+            self._build_window()
+
         def togglePause_(self, sender):
             now = time.time()
             if self.paused:
@@ -592,21 +708,28 @@ def run_overlay(config, echo=False, dock=False):
             else:
                 self.elapsed_accum += now - self.active_since
                 self.paused = True
-                self.speech_start = None
+                if self.speech_start is not None:
+                    self._end_turn()
                 self.pause_btn.setTitle_("Resume")
 
         def reset_(self, sender):
             self.counts = {}
             self.total = 0
+            self.words_total = 0
             self.events = []
+            self.filler_times = []
+            self.turns = []
+            self.long_turns = 0
+            self.run_flagged = False
             self.elapsed_accum = 0.0
             self.active_since = time.time()
             self.speech_start = None
             self.graph.buckets = [0]
             self.graph.setNeedsDisplay_(True)
             self.total_lbl.setStringValue_("0")
-            for lbl in self.break_lbls.values():
-                lbl.setStringValue_("0")
+            self.score_lbl.setStringValue_("—")
+            self.score_lbl.setTextColor_(DIM)
+            self._refresh_words()
 
         def quit_(self, sender):
             try:
@@ -655,7 +778,7 @@ def run_overlay(config, echo=False, dock=False):
 
             y -= 34
             label(v, 20, y, 200, 16, 12, NSColor.labelColor(), weight_bold=True,
-                  text="Monologue warning")
+                  text="Airtime warning")
             mono = self.cfg.get("monologue", {})
             pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                 NSMakeRect(210, y - 4, 170, 26), False)
@@ -703,6 +826,25 @@ def run_overlay(config, echo=False, dock=False):
             if self.settings_win is not None:
                 self.settings_win.orderOut_(None)
 
+        # ---- self-test hook (FILLER_COACH_EXERCISE=1): drive the UI paths ----
+        def exercise_(self, timer):
+            step = getattr(self, "_ex_step", 0)
+            self._ex_step = step + 1
+            if step == 0:
+                self.toggleWords_(None)           # expand
+            elif step == 1:
+                self._apply({"um": 2, "like": 1})  # counts + flash + graph
+                self.words_total += 40
+            elif step == 2:
+                self.toggleWords_(None)           # collapse (keeps counts)
+            elif step == 3:
+                self.togglePause_(None)           # pause
+            elif step == 4:
+                self.togglePause_(None)           # resume
+                assert self.total == 3, f"total lost across rebuilds: {self.total}"
+                assert "×2" in str(self.acc_btn.title()), "top word not in accordion title"
+                print("EXERCISE OK", flush=True)
+
         def saveSettings_(self, sender):
             fillers = [ln.strip() for ln in str(self.tv_fillers.string()).split("\n")
                        if ln.strip()]
@@ -715,7 +857,7 @@ def run_overlay(config, echo=False, dock=False):
             sel = self.pop_mic.indexOfSelectedItem()
             self.cfg["mic_device"] = None if sel <= 0 else self._mic_devs[sel - 1][0]
             save_config(self.cfg)
-            # apply live: restart listener with new matchers, rebuild overlay rows
+            # apply live: restart listener with new matchers, rebuild overlay
             try:
                 self.listener.stop()
             except Exception:
@@ -735,6 +877,9 @@ def run_overlay(config, echo=False, dock=False):
         # render for N seconds then quit — used to verify the overlay launches
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             float(_selftest), controller, b"quit:", None, False)
+        if os.environ.get("FILLER_COACH_EXERCISE"):
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.4, controller, b"exercise:", None, True)
     app.run()
 
 

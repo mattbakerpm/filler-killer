@@ -16,18 +16,28 @@ floating, always-on-top counter of filler words ("um", "uh", "you know",
 
 ## Features
 
-- **Big live counter** + per-filler breakdown (all your configured fillers).
+- **Big live counter** — flashes amber (red when your rate is high) on each
+  slip; the background never changes.
+- **Speaking score (0–100)** — a live composite of how clean you sound:
+  - *density* (50%): fillers per 100 spoken words,
+  - *spread* (20%): clustered slips score worse than isolated ones,
+  - *airtime* (30%): long uninterrupted turns cost points (skipped when the
+    airtime warning is off).
+  Appears after ~30 spoken words. Green ≥ 85, amber ≥ 65, red below.
 - **Rate per minute**, color-coded: green < 4/min, amber 4–8, red ≥ 8.
 - **Timeline graph** — fillers per 30s interval, growing left → right and
   compressing so the whole call stays visible. At the end of a call you can see
   at a glance whether you tightened up.
-- **Monologue warning** — if you talk continuously past a limit, the overlay
-  warns you to wrap it up. Modes: **Off** (presentations), **Short** (~30s,
-  interviews — let them talk), **Medium** (~90s, meetings). A 2s pause resets
-  the clock.
+- **Airtime guard** — warns "◼ WRAP IT UP" when you talk continuously past a
+  limit. Modes: **Off** (presentations), **Short** (~30s, interviews — let them
+  talk), **Medium** (~90s, meetings). A 2s pause resets the clock. The stats
+  line shows your talking **turns**, **median turn length**, and **long-turn
+  count** (turns under 3s — "yeah", "mm-hmm" — don't count).
+- **Words accordion** — collapsed by default (shows your top offender inline);
+  click to expand, always sorted highest count first.
 - **Pause / Reset / Quit** buttons; drag the panel anywhere.
 - **In-app settings** (⚙) — add/remove filler words, pick your mic, set the
-  monologue mode. Saved to `config.json`.
+  airtime mode. Saved to `config.json`.
 - **Dock app** — build `FillerCoach.app` and launch it like any other app.
 
 ## Install (one time)
@@ -100,9 +110,8 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 |-----|---------|
 | `fillers` | Word fillers/phrases for the word pass (multi-word supported). |
 | `acoustic_fillers` | Sounds for the acoustic pass (default `um`, `uh`). Must be single in-vocabulary words; adding more raises false-positive risk. |
-| `display_priority` | Which fillers show in the breakdown. `[]` = show all; the window sizes itself. |
 | `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). |
-| `monologue` | `mode`: `off` / `short` / `medium`, plus the two thresholds in seconds. |
+| `monologue` | Airtime guard: `mode` `off` / `short` / `medium`, plus the two thresholds in seconds. |
 | `graph.bucket_seconds` | Timeline graph interval (default 30). |
 | `window`, `alert` | Position, opacity, flash, rate window. |
 

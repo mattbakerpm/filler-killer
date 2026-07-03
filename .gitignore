@@ -8,7 +8,7 @@ model/
 model*.zip
 
 # built app bundle (rebuild with ./make_app.sh)
-FillerCoach.app/
+FillerKiller.app/
 
 # macOS
 .DS_Store

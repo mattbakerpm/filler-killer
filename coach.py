@@ -222,6 +222,7 @@ class Listener(threading.Thread):
 
         self.out.put(("status", "listening"))
         try:
+            import audioop
             with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=8000,
                                    device=self.mic_device, dtype="int16",
                                    channels=1, callback=audio_cb):
@@ -231,6 +232,9 @@ class Listener(threading.Thread):
                         data = audio_q.get(timeout=0.25)
                     except queue.Empty:
                         continue
+                    # level ping lets the UI show the mic is actually hearing
+                    # something (mic permission problems produce pure silence)
+                    self.out.put(("level", audioop.rms(data, 2)))
                     process_block(data, rec_word, rec_ac, self.matchers,
                                   ac_set, self.out, echo=self.echo)
         except Exception as e:
@@ -401,6 +405,10 @@ def run_overlay(config, echo=False, dock=False):
             self.speech_start = None
             self.q = queue.Queue()
             self.settings_win = None
+            self.mic_ok = False
+            self.listen_started = None
+            self.last_loud = 0.0
+            self.max_rms = 0
             self.panel = None
             self.graph = None
             self._build_window()
@@ -567,11 +575,19 @@ def run_overlay(config, echo=False, dock=False):
                     evt = self.q.get_nowait()
                     kind = evt[0]
                     if kind == "status":
+                        self.mic_ok = True
+                        self.listen_started = now
                         self.dot.setTextColor_(OK)
                     elif kind == "error":
+                        self.mic_ok = False
                         self.dot.setTextColor_(ACCENT)
                         self.total_lbl.setStringValue_("!")
                         print(evt[1])
+                    elif kind == "level":
+                        rms = evt[1]
+                        self.max_rms = max(self.max_rms, rms)
+                        if rms > 400:
+                            self.last_loud = now
                     elif self.paused:
                         continue
                     elif kind == "final":
@@ -674,6 +690,19 @@ def run_overlay(config, echo=False, dock=False):
             # number flash (background never changes)
             self.total_lbl.setTextColor_(
                 self.flash_color if now < self.flash_until else FG)
+            # mic health: bright dot while sound is coming in, dim when quiet,
+            # warning if the stream is open but only silence arrives (that's
+            # what a missing/denied Microphone permission looks like)
+            if self.mic_ok:
+                if now - self.last_loud < 0.8:
+                    self.dot.setTextColor_(OK)
+                else:
+                    self.dot.setTextColor_(OK.colorWithAlphaComponent_(0.35))
+                if (self.max_rms < 10 and self.listen_started
+                        and now - self.listen_started > 6):
+                    self.air_lbl.setStringValue_(
+                        "⚠ mic silent — check Microphone permission")
+                    self.air_lbl.setTextColor_(AMBER)
 
         @objc.python_method
         def _end_turn(self):
@@ -870,6 +899,15 @@ def run_overlay(config, echo=False, dock=False):
     app.setActivationPolicy_(
         NSApplicationActivationPolicyRegular if dock
         else NSApplicationActivationPolicyAccessory)
+    # Explicitly request mic access up front so the TCC prompt appears at
+    # launch (attributed to this app) instead of being silently auto-denied
+    # when the audio stream opens. No-op if permission is already decided.
+    try:
+        import AVFoundation
+        AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+            AVFoundation.AVMediaTypeAudio, lambda granted: None)
+    except Exception:
+        pass  # framework not installed (e.g. ./run.sh venv) — Terminal's grant applies
     controller = Controller.alloc().init()
     controller.setup(config)
     _selftest = os.environ.get("FILLER_COACH_SELFTEST")

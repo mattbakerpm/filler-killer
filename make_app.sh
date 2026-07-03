@@ -30,8 +30,8 @@ mkdir -p "$APP/Contents/MacOS" "$RES/app"
 echo "==> Creating embedded venv"
 /usr/bin/python3 -m venv "$RES/venv"
 "$RES/venv/bin/python" -m pip install --quiet --upgrade pip
-echo "==> Installing packages into the app (vosk, sounddevice, pyobjc Cocoa)"
-"$RES/venv/bin/python" -m pip install --quiet vosk sounddevice pyobjc-framework-Cocoa
+echo "==> Installing packages into the app (vosk, sounddevice, pyobjc Cocoa+AVFoundation)"
+"$RES/venv/bin/python" -m pip install --quiet vosk sounddevice pyobjc-framework-Cocoa pyobjc-framework-AVFoundation
 
 # --- app code, config, model ---
 cp coach.py "$RES/app/"
@@ -96,12 +96,41 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # --- relocatable launcher (paths relative to the bundle itself) ---
-cat > "$APP/Contents/MacOS/FillerKiller" <<'LAUNCH'
-#!/bin/bash
-RES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../Resources" && pwd)"
-exec "$RES/venv/bin/python" "$RES/app/coach.py" --dock
-LAUNCH
-chmod +x "$APP/Contents/MacOS/FillerKiller"
+# A shell script that exec's python breaks microphone TCC: at access time the
+# process identity is Apple's python3 (no usage description) and macOS silently
+# auto-denies without prompting. A compiled binary that runs python as a CHILD
+# keeps FillerKiller.app as the responsible process, so the mic prompt appears
+# and is attributed to this app.
+cat > /tmp/fillerkiller_launcher.swift <<'SWIFT'
+import Foundation
+
+let exeURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+let res = exeURL.deletingLastPathComponent()          // MacOS/
+    .deletingLastPathComponent()                       // Contents/
+    .appendingPathComponent("Resources")
+
+let proc = Process()
+proc.executableURL = res.appendingPathComponent("venv/bin/python")
+proc.arguments = [res.appendingPathComponent("app/coach.py").path, "--dock"]
+
+signal(SIGTERM, SIG_IGN)
+let src = DispatchSource.makeSignalSource(signal: SIGTERM)
+src.setEventHandler { proc.terminate() }
+src.resume()
+
+do {
+    try proc.run()
+} catch {
+    FileHandle.standardError.write("launch failed: \(error)\n".data(using: .utf8)!)
+    exit(1)
+}
+proc.waitUntilExit()
+exit(proc.terminationStatus)
+SWIFT
+swiftc -O /tmp/fillerkiller_launcher.swift -o "$APP/Contents/MacOS/FillerKiller"
+
+# ad-hoc sign so TCC has a stable code identity for the permission grant
+codesign --force --deep --sign - "$APP" 2>/dev/null || true
 
 du -sh "$APP" | awk '{print "==> Built " $2 " (" $1 ")"}'
 
@@ -109,6 +138,8 @@ if [ "${1:-}" = "--install" ]; then
   echo "==> Installing to /Applications"
   rm -rf /Applications/FillerKiller.app /Applications/FillerCoach.app  # drop pre-rebrand app too
   ditto "$APP" /Applications/FillerKiller.app
+  # clear any stale auto-denied mic decision so the prompt can appear
+  tccutil reset Microphone local.fillerkiller >/dev/null 2>&1 || true
   echo "==> Launching"
   open -a /Applications/FillerKiller.app
   echo "    Allow the Microphone prompt on first run, then right-click the"

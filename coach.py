@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Filler Coach — a local, real-time filler-word counter.
+Filler Killer — slay what you say. A local, real-time filler-word counter.
 
 Listens to your microphone with an offline speech-to-text engine (Vosk),
 counts filler words/phrases as you speak, and shows an always-on-top floating
@@ -11,7 +11,7 @@ No cloud, no API keys, no LLM/AI tokens — audio never leaves the Mac.
 Usage:
     python coach.py                 # run the overlay
     python coach.py --echo          # also print recognized text (for tuning)
-    python coach.py --dock          # show a Dock icon (used by FillerCoach.app)
+    python coach.py --dock          # show a Dock icon (used by FillerKiller.app)
     python coach.py --list-devices  # print available input devices and exit
 """
 
@@ -477,7 +477,7 @@ def run_overlay(config, echo=False, dock=False):
             y = H - 10
             # header
             y -= 16
-            label(view, PAD, y, 120, 16, 10, DIM, weight_bold=True, text="FILLER COACH")
+            label(view, PAD, y, 120, 16, 10, DIM, weight_bold=True, text="FILLER KILLER")
             self.dot = label(view, W - 28, y - 1, 14, 16, 13, DIM, text="●")
             gear = NSButton.alloc().initWithFrame_(NSMakeRect(W - 58, y - 4, 26, 22))
             gear.setTitle_("⚙")
@@ -749,7 +749,7 @@ def run_overlay(config, echo=False, dock=False):
                 NSMakeRect(0, 0, SW, SH),
                 NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
                 NSBackingStoreBuffered, False)
-            win.setTitle_("Filler Coach Settings")
+            win.setTitle_("Filler Killer Settings")
             win.setReleasedWhenClosed_(False)
             win.setLevel_(NSFloatingWindowLevel)
             v = win.contentView()
@@ -900,7 +900,7 @@ def main():
     ap.add_argument("--echo", action="store_true",
                     help="print recognized text to the terminal (for tuning the filler list)")
     ap.add_argument("--dock", action="store_true",
-                    help="show a Dock icon (used by the FillerCoach.app bundle)")
+                    help="show a Dock icon (used by the FillerKiller.app bundle)")
     args = ap.parse_args()
 
     if args.list_devices:

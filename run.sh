@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch Filler Coach.
+# Launch Filler Killer.
 set -euo pipefail
 cd "$(dirname "$0")"
 

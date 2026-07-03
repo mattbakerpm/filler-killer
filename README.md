@@ -1,8 +1,13 @@
-# Filler Coach
+<p align="center">
+  <img src="assets/filler-killer-logo.svg" alt="Filler Killer — slay what you say" width="420">
+</p>
 
-A tiny **local** macOS app that listens to your speech in real time and shows a
-floating, always-on-top counter of filler words ("um", "uh", "you know",
-"like"...) while you're on a call — so you can finally stop saying them.
+# Filler Killer
+
+**Slay what you say.** A tiny **local** macOS app that listens to your speech
+in real time and shows a floating, always-on-top counter of filler words
+("um", "uh", "you know", "like"...) while you're on a call — so you can
+finally stop saying them.
 
 - **100% local** — audio is captured from your mic and transcribed *on your
   Mac* by [Vosk](https://alphacephei.com/vosk/), an offline speech-to-text
@@ -38,7 +43,7 @@ floating, always-on-top counter of filler words ("um", "uh", "you know",
 - **Pause / Reset / Quit** buttons; drag the panel anywhere.
 - **In-app settings** (⚙) — add/remove filler words, pick your mic, set the
   airtime mode. Saved to `config.json`.
-- **Dock app** — build `FillerCoach.app` and launch it like any other app.
+- **Dock app** — build `FillerKiller.app` and launch it like any other app.
 
 ## Install (one time)
 
@@ -46,7 +51,7 @@ Requires macOS + [Homebrew](https://brew.sh).
 
 ```bash
 git clone <this repo>
-cd filler-coach
+cd filler-killer
 ./setup.sh    # installs portaudio, creates a venv, downloads the ~40MB model
 ```
 
@@ -60,7 +65,7 @@ cd filler-coach
 Or install it as a Dock app:
 
 ```bash
-./make_app.sh --install   # builds FillerCoach.app + installs to /Applications + launches
+./make_app.sh --install   # builds FillerKiller.app + installs to /Applications + launches
 ```
 
 The bundle is **self-contained** (own venv, model, code, and config — ~100MB),
@@ -78,7 +83,7 @@ thin wrapper would silently die). Consequences:
 Normal speech-to-text **cannot** hear "um"/"uh": the language model
 "autocorrects" them into real words ("am", "i'm", "are") — true of cloud
 transcription services, Whisper, and Vosk's normal mode alike. Bigger models
-don't fix it; they share the same language-model bias. So Filler Coach runs
+don't fix it; they share the same language-model bias. So Filler Killer runs
 **two recognizers over the same audio**:
 
 ```
@@ -100,7 +105,7 @@ the live red flash.
 
 ## Excluding other people's voices
 
-Filler Coach counts whatever the microphone hears. On a call:
+Filler Killer counts whatever the microphone hears. On a call:
 
 - **Wear headphones** (recommended) — the other side's audio then never reaches
   your mic, so only *your* speech is counted.

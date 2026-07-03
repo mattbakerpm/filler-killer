@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Filler Coach — one-time setup. Creates a venv, installs offline STT deps,
+# Filler Killer — one-time setup. Creates a venv, installs offline STT deps,
 # downloads the Vosk English model. No API keys, no cloud accounts.
 set -euo pipefail
 
 cd "$(dirname "$0")"
-echo "==> Filler Coach setup"
+echo "==> Filler Killer setup"
 
 # --- portaudio (needed by sounddevice for mic capture) ---
 if ! brew list portaudio >/dev/null 2>&1; then

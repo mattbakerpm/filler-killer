@@ -278,6 +278,61 @@ def fmt_mmss(seconds):
 
 
 # --------------------------------------------------------------------------
+# App identity + sessions
+# --------------------------------------------------------------------------
+__version__ = "1.1.0"
+GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
+
+ABOUT_TEXT = (
+    "Hi, I'm Matt. I say “um” and “you know” way too much — "
+    "at a genuinely distracting level — and I wanted live feedback during real "
+    "calls, not a report afterwards, and definitely not my meeting audio "
+    "shipped to someone's cloud.\n\n"
+    "So Filler Killer runs entirely on your Mac: an offline speech engine, a "
+    "floating counter, and zero network calls. If it helps you slay what you "
+    "say too, that's the whole point. It's free and open source — issues and "
+    "PRs welcome."
+)
+
+SESSIONS_DIR = os.path.expanduser(
+    "~/Library/Application Support/FillerKiller/sessions")
+
+
+def list_sessions():
+    """All saved sessions, newest first."""
+    out = []
+    try:
+        for fn in os.listdir(SESSIONS_DIR):
+            if fn.endswith(".json"):
+                try:
+                    with open(os.path.join(SESSIONS_DIR, fn)) as f:
+                        s = json.load(f)
+                    s["_file"] = fn
+                    out.append(s)
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        pass
+    out.sort(key=lambda s: s.get("id", ""), reverse=True)
+    return out
+
+
+def write_session(sess):
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    path = os.path.join(SESSIONS_DIR, sess["id"] + ".json")
+    with open(path, "w") as f:
+        json.dump({k: v for k, v in sess.items() if not k.startswith("_")},
+                  f, indent=2)
+
+
+def delete_session(sess):
+    try:
+        os.remove(os.path.join(SESSIONS_DIR, sess["_file"]))
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
 # Native Cocoa overlay
 # --------------------------------------------------------------------------
 def run_overlay(config, echo=False, dock=False):
@@ -293,7 +348,21 @@ def run_overlay(config, echo=False, dock=False):
         NSWindowCollectionBehaviorCanJoinAllSpaces,
         NSWindowCollectionBehaviorFullScreenAuxiliary,
         NSBezelStyleRounded,
+        NSMenu, NSMenuItem, NSImage, NSImageView, NSTableView, NSTableColumn,
+        NSWorkspace, NSURL,
     )
+    from Foundation import NSBundle
+
+    # The GUI process is the framework python, so the menu bar would say
+    # "Python". Patching CFBundleName in the live info dictionary BEFORE
+    # NSApplication is initialized makes the app menu say "Filler Killer".
+    try:
+        info = (NSBundle.mainBundle().localizedInfoDictionary()
+                or NSBundle.mainBundle().infoDictionary())
+        if info is not None:
+            info["CFBundleName"] = "Filler Killer"
+    except Exception:
+        pass
 
     def rgb(r, g, b, a=1.0):
         return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
@@ -405,10 +474,15 @@ def run_overlay(config, echo=False, dock=False):
             self.speech_start = None
             self.q = queue.Queue()
             self.settings_win = None
+            self.about_win = None
+            self.history_win = None
+            self.hist_sessions = []
             self.mic_ok = False
             self.listen_started = None
             self.last_loud = 0.0
             self.max_rms = 0
+            self._new_session()
+            self.last_autosave = time.time()
             self.panel = None
             self.graph = None
             self._build_window()
@@ -703,6 +777,49 @@ def run_overlay(config, echo=False, dock=False):
                     self.air_lbl.setStringValue_(
                         "⚠ mic silent — check Microphone permission")
                     self.air_lbl.setTextColor_(AMBER)
+            # autosave the session twice a minute
+            if now - self.last_autosave > 30:
+                self.last_autosave = now
+                self._save_session()
+
+        # ---- session persistence ----
+        @objc.python_method
+        def _new_session(self):
+            t = time.localtime()
+            self.session_id = time.strftime("%Y%m%d-%H%M%S", t)
+            self.session_name = time.strftime("%b %-d · %-I:%M %p", t)
+            self.session_started = time.strftime("%Y-%m-%dT%H:%M:%S", t)
+
+        @objc.python_method
+        def _session_meaningful(self):
+            return (self.words_total >= 30 or
+                    (self.total >= 1 and self.active_time() >= 60))
+
+        @objc.python_method
+        def _save_session(self):
+            """Autosave the running session (idempotent per session_id)."""
+            if not self._session_meaningful():
+                return
+            active = self.active_time()
+            limit = airtime_limit(self.cfg)
+            med = statistics.median(self.turns) if self.turns else None
+            write_session({
+                "id": self.session_id,
+                "name": self.session_name,
+                "started": self.session_started,
+                "duration": round(active),
+                "words": self.words_total,
+                "fillers": self.total,
+                "counts": self.counts,
+                "score": compute_score(self.words_total, self.filler_times,
+                                       self.long_turns, limit is not None),
+                "rate": round(self.total / max(1.0, active / 60.0), 2),
+                "turns": len(self.turns),
+                "median_turn": round(med, 1) if med is not None else None,
+                "long_turns": self.long_turns,
+                "buckets": self.graph.buckets,
+                "bucket_seconds": self.graph.bucket_seconds,
+            })
 
         @objc.python_method
         def _end_turn(self):
@@ -742,6 +859,8 @@ def run_overlay(config, echo=False, dock=False):
                 self.pause_btn.setTitle_("Resume")
 
         def reset_(self, sender):
+            self._save_session()      # finalize the old session first
+            self._new_session()
             self.counts = {}
             self.total = 0
             self.words_total = 0
@@ -761,6 +880,10 @@ def run_overlay(config, echo=False, dock=False):
             self._refresh_words()
 
         def quit_(self, sender):
+            try:
+                self._save_session()
+            except Exception:
+                pass
             try:
                 self.listener.stop()
             except Exception:
@@ -855,6 +978,188 @@ def run_overlay(config, echo=False, dock=False):
             if self.settings_win is not None:
                 self.settings_win.orderOut_(None)
 
+        # ---- About window ----
+        def openAbout_(self, sender):
+            if self.about_win is not None:
+                NSApp.activateIgnoringOtherApps_(True)
+                self.about_win.makeKeyAndOrderFront_(None)
+                return
+            AW, AH = 420, 470
+            win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, AW, AH),
+                NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+                NSBackingStoreBuffered, False)
+            win.setTitle_("About Filler Killer")
+            win.setReleasedWhenClosed_(False)
+            win.setLevel_(NSFloatingWindowLevel)
+            v = win.contentView()
+
+            mark_path = os.path.join(HERE, "assets", "filler-killer-mark.svg")
+            img = NSImage.alloc().initWithContentsOfFile_(mark_path)
+            if img is not None:
+                iv = NSImageView.alloc().initWithFrame_(
+                    NSMakeRect((AW - 110) / 2, AH - 140, 110, 110))
+                iv.setImage_(img)
+                v.addSubview_(iv)
+
+            def alabel(y, h, size, text, bold=False, dim=False, wrap=False):
+                f = NSTextField.alloc().initWithFrame_(NSMakeRect(28, y, AW - 56, h))
+                f.setBezeled_(False)
+                f.setDrawsBackground_(False)
+                f.setEditable_(False)
+                f.setSelectable_(False)
+                f.setAlignment_(1 if not wrap else 0)  # centered / natural
+                f.setFont_(NSFont.boldSystemFontOfSize_(size) if bold
+                           else NSFont.systemFontOfSize_(size))
+                f.setTextColor_(NSColor.secondaryLabelColor() if dim
+                                else NSColor.labelColor())
+                f.setStringValue_(text)
+                v.addSubview_(f)
+                return f
+
+            alabel(AH - 175, 26, 21, "Filler Killer", bold=True)
+            alabel(AH - 197, 18, 13, "slay what you say", dim=True)
+            alabel(AH - 220, 16, 11,
+                   f"v{__version__} · 100% local · no cloud, no tokens · MIT",
+                   dim=True)
+            alabel(78, 158, 12, ABOUT_TEXT, wrap=True)
+
+            gh = button(v, AW - 130, 16, 102, "GitHub", self, b"openGitHub:")
+            gh.setToolTip_(GITHUB_URL)
+            button(v, 28, 16, 90, "Close", self, b"closeAbout:")
+
+            win.center()
+            self.about_win = win
+            NSApp.activateIgnoringOtherApps_(True)
+            win.makeKeyAndOrderFront_(None)
+
+        def closeAbout_(self, sender):
+            if self.about_win is not None:
+                self.about_win.orderOut_(None)
+
+        def openGitHub_(self, sender):
+            NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(GITHUB_URL))
+
+        # ---- History window ----
+        def openHistory_(self, sender):
+            self.hist_sessions = list_sessions()
+            if self.history_win is not None:
+                self.hist_table.reloadData()
+                self.hist_spark.setNeedsDisplay_(True)
+                NSApp.activateIgnoringOtherApps_(True)
+                self.history_win.makeKeyAndOrderFront_(None)
+                return
+            HW, HH = 600, 440
+            win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, HW, HH),
+                NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+                NSBackingStoreBuffered, False)
+            win.setTitle_("Session History")
+            win.setReleasedWhenClosed_(False)
+            win.setLevel_(NSFloatingWindowLevel)
+            v = win.contentView()
+
+            controller = self
+
+            class SparkView(NSView):
+                def drawRect_(self, rect):
+                    b = self.bounds()
+                    w, h = b.size.width, b.size.height
+                    sess = [s for s in reversed(controller.hist_sessions)
+                            if s.get("score") is not None][-40:]
+                    NSColor.secondaryLabelColor().colorWithAlphaComponent_(0.3).setFill()
+                    NSBezierPath.fillRect_(NSMakeRect(0, 0, w, 1))
+                    if not sess:
+                        return
+                    n = len(sess)
+                    gap = 2.0
+                    bw = min(16.0, (w - gap * (n - 1)) / n)
+                    for i, s in enumerate(sess):
+                        sc = s["score"]
+                        color = OK if sc >= 85 else AMBER if sc >= 65 else ACCENT
+                        color.setFill()
+                        NSBezierPath.fillRect_(NSMakeRect(
+                            i * (bw + gap), 1, bw, 3 + (sc / 100.0) * (h - 4)))
+
+            lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(20, HH - 30, 300, 16))
+            lbl.setBezeled_(False); lbl.setDrawsBackground_(False)
+            lbl.setEditable_(False); lbl.setSelectable_(False)
+            lbl.setFont_(NSFont.boldSystemFontOfSize_(12))
+            lbl.setStringValue_("Score over time  (oldest → newest)")
+            v.addSubview_(lbl)
+            spark = SparkView.alloc().initWithFrame_(NSMakeRect(20, HH - 92, HW - 40, 56))
+            v.addSubview_(spark)
+            self.hist_spark = spark
+
+            table = NSTableView.alloc().initWithFrame_(NSMakeRect(0, 0, HW - 40, 280))
+            cols = [("name", "Session (double-click to rename)", 190, True),
+                    ("duration", "Length", 60, False),
+                    ("words", "Words", 60, False),
+                    ("fillers", "Fillers", 55, False),
+                    ("rate", "/min", 50, False),
+                    ("score", "Score", 50, False)]
+            for ident, title, width, editable in cols:
+                c = NSTableColumn.alloc().initWithIdentifier_(ident)
+                c.headerCell().setStringValue_(title)
+                c.setWidth_(width)
+                c.setEditable_(editable)
+                table.addTableColumn_(c)
+            table.setDataSource_(self)
+            table.setDelegate_(self)
+            table.setUsesAlternatingRowBackgroundColors_(True)
+            scroll = NSScrollView.alloc().initWithFrame_(
+                NSMakeRect(20, 56, HW - 40, HH - 160))
+            scroll.setHasVerticalScroller_(True)
+            scroll.setDocumentView_(table)
+            v.addSubview_(scroll)
+            self.hist_table = table
+
+            button(v, 20, 14, 110, "Delete", self, b"deleteSession:")
+            button(v, HW - 110, 14, 90, "Close", self, b"closeHistory:")
+
+            win.center()
+            self.history_win = win
+            NSApp.activateIgnoringOtherApps_(True)
+            win.makeKeyAndOrderFront_(None)
+
+        def closeHistory_(self, sender):
+            if self.history_win is not None:
+                self.history_win.orderOut_(None)
+
+        def deleteSession_(self, sender):
+            row = self.hist_table.selectedRow()
+            if 0 <= row < len(self.hist_sessions):
+                delete_session(self.hist_sessions[row])
+                self.hist_sessions = list_sessions()
+                self.hist_table.reloadData()
+                self.hist_spark.setNeedsDisplay_(True)
+
+        # NSTableView data source (history)
+        def numberOfRowsInTableView_(self, table):
+            return len(self.hist_sessions)
+
+        def tableView_objectValueForTableColumn_row_(self, table, col, row):
+            s = self.hist_sessions[row]
+            ident = str(col.identifier())
+            if ident == "name":
+                return s.get("name", s.get("id", "?"))
+            if ident == "duration":
+                return fmt_mmss(s.get("duration", 0))
+            if ident == "score":
+                sc = s.get("score")
+                return "—" if sc is None else str(sc)
+            if ident == "rate":
+                return f"{s.get('rate', 0):.1f}"
+            return str(s.get(ident, ""))
+
+        def tableView_setObjectValue_forTableColumn_row_(self, table, value, col, row):
+            if str(col.identifier()) == "name" and 0 <= row < len(self.hist_sessions):
+                s = self.hist_sessions[row]
+                s["name"] = str(value).strip() or s["name"]
+                write_session(s)
+                if s.get("id") == self.session_id:
+                    self.session_name = s["name"]
+
         # ---- self-test hook (FILLER_COACH_EXERCISE=1): drive the UI paths ----
         def exercise_(self, timer):
             step = getattr(self, "_ex_step", 0)
@@ -872,6 +1177,17 @@ def run_overlay(config, echo=False, dock=False):
                 self.togglePause_(None)           # resume
                 assert self.total == 3, f"total lost across rebuilds: {self.total}"
                 assert "×2" in str(self.acc_btn.title()), "top word not in accordion title"
+            elif step == 5:
+                self.words_total += 100           # make session meaningful
+                self._save_session()
+                assert any(s["id"] == self.session_id for s in list_sessions()), \
+                    "session not persisted"
+                self.openAbout_(None)
+                self.closeAbout_(None)
+                self.openHistory_(None)
+                assert self.hist_table.numberOfRows() >= 1, "history table empty"
+                self.closeHistory_(None)
+                delete_session({"_file": self.session_id + ".json"})  # clean up test session
                 print("EXERCISE OK", flush=True)
 
         def saveSettings_(self, sender):
@@ -910,6 +1226,27 @@ def run_overlay(config, echo=False, dock=False):
         pass  # framework not installed (e.g. ./run.sh venv) — Terminal's grant applies
     controller = Controller.alloc().init()
     controller.setup(config)
+
+    # real app menu (About / Settings / History / Quit)
+    main_menu = NSMenu.alloc().init()
+    app_item = NSMenuItem.alloc().init()
+    main_menu.addItem_(app_item)
+    app_menu = NSMenu.alloc().initWithTitle_("Filler Killer")
+
+    def mitem(title, action, key, modifier_free=False):
+        it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+        it.setTarget_(controller)
+        app_menu.addItem_(it)
+        return it
+
+    mitem("About Filler Killer", b"openAbout:", "")
+    app_menu.addItem_(NSMenuItem.separatorItem())
+    mitem("Settings…", b"openSettings:", ",")
+    mitem("Session History…", b"openHistory:", "y")
+    app_menu.addItem_(NSMenuItem.separatorItem())
+    mitem("Quit Filler Killer", b"quit:", "q")
+    app_item.setSubmenu_(app_menu)
+    NSApp.setMainMenu_(main_menu)
     _selftest = os.environ.get("FILLER_COACH_SELFTEST")
     if _selftest:
         # render for N seconds then quit — used to verify the overlay launches

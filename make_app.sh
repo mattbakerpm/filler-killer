@@ -33,9 +33,10 @@ echo "==> Creating embedded venv"
 echo "==> Installing packages into the app (vosk, sounddevice, pyobjc Cocoa+AVFoundation)"
 "$RES/venv/bin/python" -m pip install --quiet vosk sounddevice pyobjc-framework-Cocoa pyobjc-framework-AVFoundation
 
-# --- app code, config, model ---
+# --- app code, config, model, brand assets (About window logo) ---
 cp coach.py "$RES/app/"
 cp config.json "$RES/app/"
+cp -R assets "$RES/app/assets"
 echo "==> Copying Vosk model (~40MB)"
 cp -R model "$RES/app/model"
 

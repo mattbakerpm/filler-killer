@@ -2,6 +2,10 @@
   <img src="assets/filler-killer-logo.svg" alt="Filler Killer — slay what you say" width="420">
 </p>
 
+<!-- TODO(matt): drop an overlay screenshot here — e.g.
+     <p align="center"><img src="assets/screenshot.png" width="300"></p>
+     Repos with a screenshot up top get dramatically more traction. -->
+
 # Filler Killer
 
 **Slay what you say.** A tiny **local** macOS app that listens to your speech
@@ -41,16 +45,22 @@ finally stop saying them.
 - **Words accordion** — collapsed by default (shows your top offender inline);
   click to expand, always sorted highest count first.
 - **Pause / Reset / Quit** buttons; drag the panel anywhere.
-- **In-app settings** (⚙) — add/remove filler words, pick your mic, set the
-  airtime mode. Saved to `config.json`.
-- **Dock app** — build `FillerKiller.app` and launch it like any other app.
+- **Session history** (⌘Y) — sessions autosave every 30 seconds (once you've
+  said ~30 words) to `~/Library/Application Support/FillerKiller/sessions/`.
+  The History window charts your score over time and lists every session's
+  length, words, fillers, rate, and score — double-click a name to rename,
+  select + Delete to remove. Watch yourself improve call over call.
+- **In-app settings** (⌘, or the ⚙ button) — add/remove filler words, pick
+  your mic, set the airtime mode. Saved to `config.json`.
+- **Dock app** — `FillerKiller.app` with a real menu bar
+  (About / Settings / Session History / Quit).
 
 ## Install (one time)
 
 Requires macOS + [Homebrew](https://brew.sh).
 
 ```bash
-git clone <this repo>
+git clone https://github.com/mattbakerpm/filler-killer.git
 cd filler-killer
 ./setup.sh    # installs portaudio, creates a venv, downloads the ~40MB model
 ```
@@ -129,8 +139,18 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 ## Privacy
 
 Offline by design. No network calls at runtime, no telemetry, no stored
-recordings or transcripts. The only download is the Vosk model, once, during
-`setup.sh`.
+recordings or transcripts (session *stats* — counts and scores, never audio or
+text — are saved locally under `~/Library/Application Support/FillerKiller/`).
+The only download is the Vosk model, once, during `setup.sh`.
+
+## Why I built this
+
+I say "um" and "you know" way too much — at a genuinely distracting level —
+and I wanted live feedback during real calls, not a report afterwards, and
+definitely not my meeting audio shipped to someone's cloud. If it helps you
+slay what you say too, that's the whole point. Issues and PRs welcome.
+
+— [Matt](https://github.com/mattbakerpm)
 
 ## License
 

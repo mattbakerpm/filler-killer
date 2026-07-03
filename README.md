@@ -57,15 +57,21 @@ cd filler-coach
 ./run.sh --echo       # + prints everything it hears (great for tuning)
 ```
 
-Or build the Dock app:
+Or install it as a Dock app:
 
 ```bash
-./make_app.sh         # builds FillerCoach.app in this folder
+./make_app.sh --install   # builds FillerCoach.app + installs to /Applications + launches
 ```
 
-Drag `FillerCoach.app` to `/Applications` or your Dock. First launch:
-right-click → Open (it's unsigned), then allow **Microphone** access.
-Rebuild the app if you move the project folder (the launcher embeds the path).
+The bundle is **self-contained** (own venv, model, code, and config — ~100MB),
+so it works from anywhere and never reads your project folder at launch
+(macOS privacy protection blocks Dock-launched apps from ~/Documents, so a
+thin wrapper would silently die). Consequences:
+
+- Right-click the Dock icon → **Options → Keep in Dock** to make it permanent.
+- Allow **Microphone** on first launch.
+- The app has its *own* `config.json`; use the in-app ⚙ to change settings.
+- After changing `coach.py` or the repo config, re-run `./make_app.sh --install`.
 
 ## How "um" / "uh" are caught (dual-pass design)
 

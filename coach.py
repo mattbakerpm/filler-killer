@@ -241,17 +241,19 @@ class Listener(threading.Thread):
             ok, _ = inp.setVoiceProcessingEnabled_error_(True, None)
             if not ok:
                 return False
-            # Voice processing ducks ALL other system audio by default, which
-            # would make your callers quieter while the app runs. Dial it to
-            # the minimum, voice-activity-only mode (macOS 14+; harmless no-op
-            # earlier). AEC itself is unaffected by the ducking level.
+            # Voice processing ducks ALL other system audio (macOS gives the
+            # echo canceller headroom — FaceTime does the same). Advanced
+            # (voice-activity) ducking is WORSE here: it ducks hardest exactly
+            # when the other audio contains voices — i.e. your callers. Use
+            # constant ducking at the minimum level instead (macOS 14+;
+            # harmless no-op earlier). AEC strength is unaffected.
             self.duck_minimized = False
             try:
                 from AVFoundation import (
                     AVAudioVoiceProcessingOtherAudioDuckingConfiguration)
                 inp.setVoiceProcessingOtherAudioDuckingConfiguration_(
                     AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
-                        True, 10))  # advanced (VAD-gated), level = Min
+                        False, 10))  # constant, level = Min
                 self.duck_minimized = True
             except Exception:
                 pass
@@ -413,7 +415,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -482,7 +484,7 @@ def run_overlay(config, echo=False, dock=False):
         NSWindowCollectionBehaviorFullScreenAuxiliary,
         NSBezelStyleRounded,
         NSMenu, NSMenuItem, NSImage, NSImageView, NSTableView, NSTableColumn,
-        NSWorkspace, NSURL, NSAttributedString, NSPNGFileType,
+        NSWorkspace, NSURL, NSAttributedString, NSPNGFileType, NSButtonTypeSwitch,
         NSFontAttributeName, NSForegroundColorAttributeName, NSImageLeft,
     )
     from Foundation import NSBundle
@@ -1093,10 +1095,12 @@ def run_overlay(config, echo=False, dock=False):
         # ---- settings window ----
         def openSettings_(self, sender):
             if self.settings_win is not None:
+                if getattr(self, "cb_ec", None) is not None:
+                    self.cb_ec.setState_(1 if self.cfg.get("echo_cancel", True) else 0)
                 NSApp.activateIgnoringOtherApps_(True)
                 self.settings_win.makeKeyAndOrderFront_(None)
                 return
-            SW, SH = 400, 470
+            SW, SH = 400, 505
             win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(0, 0, SW, SH),
                 NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -1162,9 +1166,19 @@ def run_overlay(config, echo=False, dock=False):
             self.pop_mic = mpop
             self._mic_devs = devs
 
-            y -= 40
+            y -= 36
+            ec = NSButton.alloc().initWithFrame_(NSMakeRect(20, y, SW - 40, 22))
+            ec.setButtonType_(NSButtonTypeSwitch)
+            ec.setTitle_("Echo cancellation — don't count voices from my speakers")
+            ec.setState_(1 if self.cfg.get("echo_cancel", True) else 0)
+            v.addSubview_(ec)
+            self.cb_ec = ec
+            y -= 26
+            label(v, 38, y, SW - 58, 16, 11, NSColor.secondaryLabelColor(),
+                  text="macOS lowers other audio a little while this runs (like FaceTime).")
+            y -= 28
             label(v, 20, y, SW - 40, 16, 11, NSColor.secondaryLabelColor(),
-                  text="Tip: wear headphones so other people's voices never reach your mic.")
+                  text="With headphones you can turn it off for full audio quality.")
 
             button(v, SW - 190, 14, 80, "Cancel", self, b"closeSettings:")
             button(v, SW - 100, 14, 80, "Save", self, b"saveSettings:")
@@ -1177,6 +1191,19 @@ def run_overlay(config, echo=False, dock=False):
         def closeSettings_(self, sender):
             if self.settings_win is not None:
                 self.settings_win.orderOut_(None)
+
+        def toggleEchoCancel_(self, sender):
+            self.cfg["echo_cancel"] = not self.cfg.get("echo_cancel", True)
+            save_config(self.cfg)
+            if getattr(self, "ec_item", None) is not None:
+                self.ec_item.setState_(1 if self.cfg["echo_cancel"] else 0)
+            if getattr(self, "cb_ec", None) is not None:
+                self.cb_ec.setState_(1 if self.cfg["echo_cancel"] else 0)
+            try:
+                self.listener.stop()
+            except Exception:
+                pass
+            self._start_listener()
 
         # ---- About window ----
         def openAbout_(self, sender):
@@ -1429,6 +1456,9 @@ def run_overlay(config, echo=False, dock=False):
                 ["off", "short", "medium"][self.pop_mono.indexOfSelectedItem()]
             sel = self.pop_mic.indexOfSelectedItem()
             self.cfg["mic_device"] = None if sel <= 0 else self._mic_devs[sel - 1][0]
+            self.cfg["echo_cancel"] = bool(self.cb_ec.state())
+            if getattr(self, "ec_item", None) is not None:
+                self.ec_item.setState_(1 if self.cfg["echo_cancel"] else 0)
             save_config(self.cfg)
             # apply live: restart listener with new matchers, rebuild overlay
             try:
@@ -1471,6 +1501,9 @@ def run_overlay(config, echo=False, dock=False):
     app_menu.addItem_(NSMenuItem.separatorItem())
     mitem("Settings…", b"openSettings:", ",")
     mitem("Session History…", b"openHistory:", "y")
+    ec_item = mitem("Echo Cancellation", b"toggleEchoCancel:", "")
+    ec_item.setState_(1 if config.get("echo_cancel", True) else 0)
+    controller.ec_item = ec_item
     app_menu.addItem_(NSMenuItem.separatorItem())
     mitem("Quit Filler Killer", b"quit:", "q")
     app_item.setSubmenu_(app_menu)

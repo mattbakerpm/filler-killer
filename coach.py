@@ -314,7 +314,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -518,6 +518,7 @@ def run_overlay(config, echo=False, dock=False):
             self.boot_time = time.time()
             self.tcc_checked = False
             self.mic_denied = False
+            self.saved_until = 0.0
             self._new_session()
             self.last_autosave = time.time()
             self.panel = None
@@ -662,7 +663,10 @@ def run_overlay(config, echo=False, dock=False):
             self.pause_btn = button(view, PAD, y, bw,
                                     "Resume" if self.paused else "Pause",
                                     self, b"togglePause:")
-            button(view, PAD + bw + 8, y, bw, "Reset", self, b"reset:")
+            end_btn = button(view, PAD + bw + 8, y, bw, "End", self, b"reset:")
+            end_btn.setToolTip_(
+                "End session — saves to History, starts a new one "
+                "(also happens automatically after silence)")
             button(view, PAD + 2 * (bw + 8), y, bw, "Quit", self, b"quit:")
 
             if top is None:
@@ -843,6 +847,16 @@ def run_overlay(config, echo=False, dock=False):
                     "⚠ mic DENIED — enable Filler Killer in Settings, relaunch")
                 self.air_lbl.setTextColor_(ACCENT)
                 self.dot.setTextColor_(ACCENT)
+            # auto-end: a meaningful session followed by long silence means
+            # the call is over — save it and start fresh for the next one
+            auto_min = self.cfg.get("session", {}).get("auto_end_minutes", 3)
+            if (auto_min and not self.paused and self.last_speech > 0
+                    and now - self.last_speech > auto_min * 60
+                    and self._session_meaningful()):
+                self.reset_(None)
+            if now < self.saved_until:
+                self.air_lbl.setStringValue_("✓ session saved to History")
+                self.air_lbl.setTextColor_(OK)
             # autosave the session twice a minute
             if now - self.last_autosave > 30:
                 self.last_autosave = now
@@ -925,6 +939,8 @@ def run_overlay(config, echo=False, dock=False):
                 self.pause_btn.setTitle_("Resume")
 
         def reset_(self, sender):
+            if self._session_meaningful():
+                self.saved_until = time.time() + 4   # brief "saved ✓" note
             self._save_session()      # finalize the old session first
             self._new_session()
             self.counts = {}
@@ -1253,6 +1269,15 @@ def run_overlay(config, echo=False, dock=False):
                 assert self.hist_table.numberOfRows() >= 1, "history table empty"
                 self.closeHistory_(None)
                 delete_session({"_file": self.session_id + ".json"})  # clean up test session
+            elif step == 6:
+                # trigger auto-end: meaningful session + fake long silence
+                self.words_total = 100
+                self._ex_old_sid = self.session_id
+                self.last_speech = time.time() - 9999
+            elif step == 7:
+                assert self.session_id != self._ex_old_sid, "auto-end did not fire"
+                assert self.total == 0, "auto-end did not clear counters"
+                delete_session({"_file": self._ex_old_sid + ".json"})
                 print("EXERCISE OK", flush=True)
 
         def saveSettings_(self, sender):

@@ -44,7 +44,10 @@ finally stop saying them.
   count** (turns under 3s — "yeah", "mm-hmm" — don't count).
 - **Words accordion** — collapsed by default (shows your top offender inline);
   click to expand, always sorted highest count first.
-- **Pause / Reset / Quit** buttons; drag the panel anywhere.
+- **Pause / End / Quit** buttons; drag the panel anywhere. **End** saves the
+  session to History and starts a fresh one — and sessions also **auto-end
+  after 3 minutes of silence** (your call ended; the next call gets its own
+  session automatically).
 - **Session history** (⌘Y) — sessions autosave every 30 seconds (once you've
   said ~30 words) to `~/Library/Application Support/FillerKiller/sessions/`.
   The History window charts your score over time and lists every session's
@@ -133,6 +136,7 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 | `acoustic_fillers` | Sounds for the acoustic pass (default `um`, `uh`). Must be single in-vocabulary words; adding more raises false-positive risk. |
 | `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). |
 | `monologue` | Airtime guard: `mode` `off` / `short` / `medium`, plus the two thresholds in seconds. |
+| `session.auto_end_minutes` | Silence minutes before a session auto-ends and saves (default 3, `0` disables). |
 | `graph.bucket_seconds` | Timeline graph interval (default 30). |
 | `window`, `alert` | Position, opacity, flash, rate window. |
 

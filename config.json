@@ -26,6 +26,10 @@
     "short_seconds": 30,
     "medium_seconds": 90
   },
+  "session": {
+    "_comment": "Sessions auto-end (save to history + start fresh) after this many minutes of silence. 0 disables auto-end.",
+    "auto_end_minutes": 3
+  },
   "graph": {
     "_comment": "Timeline graph: fillers per interval, bars compress so the whole call stays visible.",
     "bucket_seconds": 30

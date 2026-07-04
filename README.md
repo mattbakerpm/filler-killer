@@ -1,10 +1,6 @@
 <p align="center">
-  <img src="assets/filler-killer-logo.svg" alt="Filler Killer — slay what you say" width="420">
+  <img src="assets/filler-killer-logo.svg" alt="Filler Killer — slay what you say" width="320">
 </p>
-
-<!-- TODO(matt): drop an overlay screenshot here — e.g.
-     <p align="center"><img src="assets/screenshot.png" width="300"></p>
-     Repos with a screenshot up top get dramatically more traction. -->
 
 # Filler Killer
 
@@ -25,6 +21,9 @@ finally stop saying them.
 - **Counts only you** — macOS echo cancellation subtracts the speaker audio,
   so the other side of a speakerphone call is ignored. No headphones required.
 
+<p align="center">
+<img width="326" height="443" alt="Filler Killer Screenshot" src="https://github.com/user-attachments/assets/989fb71d-9d06-4396-a24b-1bee9f8c821d" />
+</p>
 ## Features
 
 - **Big live counter** — flashes amber (red when your rate is high) on each

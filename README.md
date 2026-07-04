@@ -131,7 +131,13 @@ transcribed by plain capture but yields **zero counted fillers** under voice
 processing, at normal volume, mic and speakers inches apart.
 
 Notes:
-- On by default (`echo_cancel` in `config.json`; set `false` for plain capture).
+- On by default. Toggle it from the **menu bar → Echo Cancellation** or the
+  Settings checkbox (`echo_cancel` in `config.json`).
+- **Other audio gets a bit quieter while it runs.** That's macOS, not a bug:
+  the system ducks other audio to give the echo canceller headroom — FaceTime
+  does the same. Filler Killer requests the minimum ducking level, but if it
+  bothers you (e.g. on headphone days, when you don't need cancellation),
+  just toggle Echo Cancellation off for full audio quality.
 - Active when using the system-default mic. Pinning a specific `mic_device`
   falls back to plain capture — prefer switching the *system* input instead.
 - It only cancels audio *this Mac* plays. Someone talking in the room with you

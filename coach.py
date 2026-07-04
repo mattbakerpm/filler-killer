@@ -413,7 +413,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -482,7 +482,8 @@ def run_overlay(config, echo=False, dock=False):
         NSWindowCollectionBehaviorFullScreenAuxiliary,
         NSBezelStyleRounded,
         NSMenu, NSMenuItem, NSImage, NSImageView, NSTableView, NSTableColumn,
-        NSWorkspace, NSURL,
+        NSWorkspace, NSURL, NSAttributedString, NSPNGFileType,
+        NSFontAttributeName, NSForegroundColorAttributeName, NSImageLeft,
     )
     from Foundation import NSBundle
 
@@ -699,20 +700,25 @@ def run_overlay(config, echo=False, dock=False):
             y -= 16
             label(view, PAD, y, 120, 16, 10, DIM, weight_bold=True, text="FILLER KILLER")
             self.dot = label(view, W - 28, y - 1, 14, 16, 13, DIM, text="●")
-            gear = NSButton.alloc().initWithFrame_(NSMakeRect(W - 58, y - 4, 26, 22))
-            gear.setTitle_("⚙")
-            gear.setBezelStyle_(NSBezelStyleRounded)
-            gear.setTarget_(self)
-            gear.setAction_(b"openSettings:")
-            gear.setToolTip_("Settings (⌘,)")
-            view.addSubview_(gear)
-            hist = NSButton.alloc().initWithFrame_(NSMakeRect(W - 88, y - 4, 26, 22))
-            hist.setTitle_("◷")
-            hist.setBezelStyle_(NSBezelStyleRounded)
-            hist.setTarget_(self)
-            hist.setAction_(b"openHistory:")
-            hist.setToolTip_("Session History (⌘Y)")
-            view.addSubview_(hist)
+            def sym_btn(x, symbol, fallback, action, tip):
+                b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y - 4, 28, 22))
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    symbol, None)
+                if img is not None:
+                    b.setImage_(img)
+                    b.setTitle_("")
+                else:
+                    b.setTitle_(fallback)
+                b.setBezelStyle_(NSBezelStyleRounded)
+                b.setTarget_(self)
+                b.setAction_(action)
+                b.setToolTip_(tip)
+                view.addSubview_(b)
+                return b
+
+            sym_btn(W - 60, "gearshape", "⚙", b"openSettings:", "Settings (⌘,)")
+            sym_btn(W - 92, "clock.arrow.circlepath", "H", b"openHistory:",
+                    "Session History (⌘Y)")
             # big row: total (left) + score (right)
             y -= 2 + 54
             self.total_lbl = label(view, PAD - 2, y, 120, 54, 44, FG,
@@ -741,12 +747,16 @@ def run_overlay(config, echo=False, dock=False):
             self.graph = gv
             # words accordion
             y -= 6 + 18
-            acc = NSButton.alloc().initWithFrame_(NSMakeRect(PAD - 6, y, W - 2 * PAD + 6, 18))
+            acc = NSButton.alloc().initWithFrame_(NSMakeRect(PAD - 4, y, W - 2 * PAD + 4, 18))
             acc.setBordered_(False)
             acc.setTarget_(self)
             acc.setAction_(b"toggleWords:")
-            acc.setFont_(NSFont.systemFontOfSize_(11))
             acc.setAlignment_(0)
+            acc.setImagePosition_(NSImageLeft)
+            try:
+                acc.setContentTintColor_(DIM)   # tints the template chevron
+            except Exception:
+                pass
             view.addSubview_(acc)
             self.acc_btn = acc
             self.row_lbls = []
@@ -780,12 +790,20 @@ def run_overlay(config, echo=False, dock=False):
         @objc.python_method
         def _refresh_words(self):
             ordered = self.sorted_counts()
-            arrow = "▾" if self.expanded else "▸"
-            title = f"{arrow} words"
+            title = "words"
             top = [p for p in ordered if self.counts.get(p, 0) > 0][:1]
             if not self.expanded and top:
                 title += f"  ·  top “{top[0]}” ×{self.counts[top[0]]}"
-            self.acc_btn.setTitle_(title)
+            chevron = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "chevron.down" if self.expanded else "chevron.right", None)
+            if chevron is not None:
+                self.acc_btn.setImage_(chevron)
+            else:
+                title = ("▾ " if self.expanded else "▸ ") + title
+            self.acc_btn.setAttributedTitle_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    " " + title, {NSFontAttributeName: NSFont.systemFontOfSize_(11),
+                                  NSForegroundColorAttributeName: DIM}))
             for (name, cnt), phrase in zip(self.row_lbls, ordered):
                 name.setStringValue_(f"“{phrase}”")
                 cnt.setStringValue_(str(self.counts.get(phrase, 0)))
@@ -1341,6 +1359,26 @@ def run_overlay(config, echo=False, dock=False):
                 if s.get("id") == self.session_id:
                     self.session_name = s["name"]
 
+        # ---- self-test hooks ----
+        def snapshot_(self, timer):
+            """FILLER_COACH_SNAPSHOT=<path-prefix>: render the panel to PNGs
+            (collapsed then expanded) so appearance can be verified headlessly."""
+            step = getattr(self, "_snap_step", 0)
+            self._snap_step = step + 1
+            prefix = os.environ.get("FILLER_COACH_SNAPSHOT", "/tmp/fk-panel")
+            if step == 0:
+                self._apply({"um": 2, "like": 1})   # give the UI real content
+            elif step in (1, 3):
+                v = self.panel.contentView()
+                rep = v.bitmapImageRepForCachingDisplayInRect_(v.bounds())
+                v.cacheDisplayInRect_toBitmapImageRep_(v.bounds(), rep)
+                png = rep.representationUsingType_properties_(NSPNGFileType, None)
+                png.writeToFile_atomically_(f"{prefix}-{'collapsed' if step == 1 else 'expanded'}.png", True)
+                if step == 1:
+                    self.toggleWords_(None)
+                else:
+                    print("SNAPSHOTS DONE", flush=True)
+
         # ---- self-test hook (FILLER_COACH_EXERCISE=1): drive the UI paths ----
         def exercise_(self, timer):
             step = getattr(self, "_ex_step", 0)
@@ -1445,6 +1483,9 @@ def run_overlay(config, echo=False, dock=False):
         if os.environ.get("FILLER_COACH_EXERCISE"):
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 0.4, controller, b"exercise:", None, True)
+        if os.environ.get("FILLER_COACH_SNAPSHOT"):
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.5, controller, b"snapshot:", None, True)
     app.run()
 
 

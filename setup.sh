@@ -24,7 +24,7 @@ source .venv/bin/activate
 
 echo "==> Installing Python packages (vosk, sounddevice)"
 python -m pip install --upgrade pip >/dev/null
-python -m pip install vosk sounddevice
+python -m pip install vosk sounddevice pyobjc-framework-Cocoa pyobjc-framework-AVFoundation
 
 # sanity: tkinter must be importable in the venv
 if ! python -c "import tkinter" 2>/dev/null; then

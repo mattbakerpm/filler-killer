@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import audioop
 import json
 import os
 import queue
@@ -180,13 +181,16 @@ def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False):
 # Audio + recognition thread (pushes events to a queue)
 # --------------------------------------------------------------------------
 class Listener(threading.Thread):
-    def __init__(self, matchers, mic_device, out_queue, acoustic_fillers=None, echo=False):
+    def __init__(self, matchers, mic_device, out_queue, acoustic_fillers=None,
+                 echo=False, echo_cancel=True):
         super().__init__(daemon=True)
         self.matchers = matchers
         self.mic_device = mic_device
         self.out = out_queue
         self.acoustic = list(acoustic_fillers or ["um", "uh"])
         self.echo = echo
+        self.echo_cancel = echo_cancel
+        self.backend = "portaudio"
         self._stop = threading.Event()
 
     def stop(self):
@@ -215,6 +219,84 @@ class Listener(threading.Thread):
             self.out.put(("error", f"Failed to load model: {e}"))
             return
 
+        # Prefer macOS voice-processing capture (echo cancellation): the OS
+        # subtracts what the Mac is playing through its speakers, so remote
+        # voices on a speakerphone call are NOT counted. Verified empirically:
+        # TTS through the speakers is fully recognized by plain capture but
+        # suppressed to nothing under voice processing. Falls back to
+        # PortAudio if unavailable, disabled, or a specific mic is pinned.
+        if self.echo_cancel and self.mic_device is None:
+            if self._run_engine(rec_word, rec_ac):
+                return
+        self._run_portaudio(sd, rec_word, rec_ac)
+
+    def _run_engine(self, rec_word, rec_ac):
+        """AVAudioEngine capture with voice processing. True = ran (or died
+        after starting); False = could not start, caller should fall back."""
+        import array
+        try:
+            from AVFoundation import AVAudioEngine
+            engine = AVAudioEngine.alloc().init()
+            inp = engine.inputNode()
+            ok, _ = inp.setVoiceProcessingEnabled_error_(True, None)
+            if not ok:
+                return False
+            fmt = inp.outputFormatForBus_(0)
+            sr = int(fmt.sampleRate())
+            aq = queue.Queue()
+
+            def tap(buf, when):
+                try:
+                    n = int(buf.frameLength())
+                    aq.put(bytes(buf.floatChannelData()[0].as_buffer(4 * n)))
+                except Exception:
+                    pass
+
+            inp.installTapOnBus_bufferSize_format_block_(0, 4096, fmt, tap)
+            engine.prepare()
+            ok, _ = engine.startAndReturnError_(None)
+            if not ok:
+                return False
+        except Exception:
+            return False
+
+        self.backend = "voice-processing (echo cancel)"
+        self.out.put(("status", "listening"))
+        ac_set = set(self.acoustic)
+        state = None
+        started = time.time()
+        diag_done = False
+        max_rms = 0
+        try:
+            while not self._stop.is_set():
+                try:
+                    raw = aq.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                floats = array.array("f", raw)
+                ints = array.array("h", (
+                    32767 if x >= 1.0 else -32768 if x <= -1.0 else int(x * 32767)
+                    for x in floats))
+                data, state = audioop.ratecv(ints.tobytes(), 2, 1, sr,
+                                             SAMPLE_RATE, state)
+                rms = audioop.rms(data, 2)
+                max_rms = max(max_rms, rms)
+                self.out.put(("level", rms))
+                if not diag_done and time.time() - started > 5:
+                    diag_done = True
+                    self._write_diagnostic(None, max_rms)
+                process_block(data, rec_word, rec_ac, self.matchers,
+                              ac_set, self.out, echo=self.echo)
+        except Exception as e:
+            self.out.put(("error", f"Audio error: {e}"))
+        finally:
+            try:
+                engine.stop()
+            except Exception:
+                pass
+        return True
+
+    def _run_portaudio(self, sd, rec_word, rec_ac):
         audio_q = queue.Queue()
 
         def audio_cb(indata, frames, time_info, status):
@@ -222,7 +304,6 @@ class Listener(threading.Thread):
 
         self.out.put(("status", "listening"))
         try:
-            import audioop
             with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=8000,
                                    device=self.mic_device, dtype="int16",
                                    channels=1, callback=audio_cb):
@@ -255,6 +336,7 @@ class Listener(threading.Thread):
     def _write_diagnostic(self, sd, max_rms, error=None):
         """Drop mic state into AppSupport for troubleshooting silent-mic issues."""
         info = {"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "backend": self.backend,
                 "max_rms_first_5s": max_rms, "error": error}
         try:
             import AVFoundation
@@ -263,13 +345,16 @@ class Listener(threading.Thread):
                     AVFoundation.AVMediaTypeAudio))  # 0=ask 1=restricted 2=denied 3=ok
         except Exception as e:
             info["tcc_status"] = f"unavailable: {e}"
-        try:
-            dev = self.mic_device
-            if dev is None:
-                dev = sd.default.device[0]
-            info["input_device"] = sd.query_devices(dev)["name"]
-        except Exception:
-            info["input_device"] = "?"
+        if sd is None:
+            info["input_device"] = "system default"
+        else:
+            try:
+                dev = self.mic_device
+                if dev is None:
+                    dev = sd.default.device[0]
+                info["input_device"] = sd.query_devices(dev)["name"]
+            except Exception:
+                info["input_device"] = "?"
         os.makedirs(os.path.dirname(SESSIONS_DIR), exist_ok=True)
         with open(os.path.join(os.path.dirname(SESSIONS_DIR), "mic-diagnostic.json"), "w") as f:
             json.dump(info, f, indent=2)
@@ -314,7 +399,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -554,7 +639,8 @@ def run_overlay(config, echo=False, dock=False):
             self.listener = Listener(matchers, self.cfg.get("mic_device", None),
                                      self.q,
                                      acoustic_fillers=self.cfg.get("acoustic_fillers"),
-                                     echo=echo)
+                                     echo=echo,
+                                     echo_cancel=self.cfg.get("echo_cancel", True))
             self.listener.start()
 
         # ---- main window ----

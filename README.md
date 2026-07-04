@@ -22,6 +22,8 @@ finally stop saying them.
 - **App-agnostic** — works over any call app (Zoom, Meet, Teams, phone,
   Granola...) because it listens to your microphone, not to any app's
   transcript.
+- **Counts only you** — macOS echo cancellation subtracts the speaker audio,
+  so the other side of a speakerphone call is ignored. No headphones required.
 
 ## Features
 
@@ -116,15 +118,24 @@ mic ────┤                                                           �
 Counting happens on **final** results (stable); **partial** hypotheses drive
 the live red flash.
 
-## Excluding other people's voices
+## Excluding other people's voices (no headphones needed)
 
-Filler Killer counts whatever the microphone hears. On a call:
+Filler Killer captures the mic through macOS's **voice-processing engine** —
+the same echo cancellation FaceTime and Zoom use. Whatever your Mac plays
+through its speakers (i.e. everyone else on the call) is subtracted from the
+mic signal *by the OS* before Filler Killer ever hears it, so on a
+speakerphone call only **your** speech is counted.
 
-- **Wear headphones** (recommended) — the other side's audio then never reaches
-  your mic, so only *your* speech is counted.
-- Or enable macOS **Voice Isolation** for your mic (Control Center → Mic Mode
-  while on a call) to suppress non-voice background.
-- On speakers, some remote-voice bleed-through into your counts is possible.
+Verified empirically: speech played through the built-in speakers is fully
+transcribed by plain capture but yields **zero counted fillers** under voice
+processing, at normal volume, mic and speakers inches apart.
+
+Notes:
+- On by default (`echo_cancel` in `config.json`; set `false` for plain capture).
+- Active when using the system-default mic. Pinning a specific `mic_device`
+  falls back to plain capture — prefer switching the *system* input instead.
+- It only cancels audio *this Mac* plays. Someone talking in the room with you
+  is still heard (headphones can't fix that either).
 
 ## Configuration
 
@@ -134,7 +145,8 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 |-----|---------|
 | `fillers` | Word fillers/phrases for the word pass (multi-word supported). |
 | `acoustic_fillers` | Sounds for the acoustic pass (default `um`, `uh`). Must be single in-vocabulary words; adding more raises false-positive risk. |
-| `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). |
+| `echo_cancel` | macOS voice-processing echo cancellation — ignore what the Mac's speakers play (default `true`). |
+| `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). Pinning a device disables `echo_cancel`. |
 | `monologue` | Airtime guard: `mode` `off` / `short` / `medium`, plus the two thresholds in seconds. |
 | `session.auto_end_minutes` | Silence minutes before a session auto-ends and saves (default 3, `0` disables). |
 | `graph.bucket_seconds` | Timeline graph interval (default 30). |

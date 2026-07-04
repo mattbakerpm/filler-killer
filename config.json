@@ -19,6 +19,8 @@
     "uh"
   ],
   "mic_device": null,
+  "_comment_echo_cancel": "macOS voice-processing echo cancellation: what your Mac plays through its speakers (other people on the call) is subtracted before counting, so you can skip headphones. Only active with the default mic (mic_device null). Set false to use plain capture.",
+  "echo_cancel": true,
   "_comment_mic": "null = system default input. Pick a device in the in-app settings, or run `./run.sh --list-devices`.",
   "monologue": {
     "_comment": "Airtime guard: warn when you've been talking continuously too long. mode: off | short | medium. A 2s silence gap resets the clock; turns under 3s don't count in stats.",

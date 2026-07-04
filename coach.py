@@ -227,6 +227,9 @@ class Listener(threading.Thread):
                                    device=self.mic_device, dtype="int16",
                                    channels=1, callback=audio_cb):
                 ac_set = set(self.acoustic)
+                started = time.time()
+                diag_done = False
+                max_rms = 0
                 while not self._stop.is_set():
                     try:
                         data = audio_q.get(timeout=0.25)
@@ -234,11 +237,42 @@ class Listener(threading.Thread):
                         continue
                     # level ping lets the UI show the mic is actually hearing
                     # something (mic permission problems produce pure silence)
-                    self.out.put(("level", audioop.rms(data, 2)))
+                    rms = audioop.rms(data, 2)
+                    max_rms = max(max_rms, rms)
+                    self.out.put(("level", rms))
+                    if not diag_done and time.time() - started > 5:
+                        diag_done = True
+                        self._write_diagnostic(sd, max_rms)
                     process_block(data, rec_word, rec_ac, self.matchers,
                                   ac_set, self.out, echo=self.echo)
         except Exception as e:
             self.out.put(("error", f"Audio error: {e}"))
+            try:
+                self._write_diagnostic(None, -1, error=str(e))
+            except Exception:
+                pass
+
+    def _write_diagnostic(self, sd, max_rms, error=None):
+        """Drop mic state into AppSupport for troubleshooting silent-mic issues."""
+        info = {"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "max_rms_first_5s": max_rms, "error": error}
+        try:
+            import AVFoundation
+            info["tcc_status"] = int(
+                AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(
+                    AVFoundation.AVMediaTypeAudio))  # 0=ask 1=restricted 2=denied 3=ok
+        except Exception as e:
+            info["tcc_status"] = f"unavailable: {e}"
+        try:
+            dev = self.mic_device
+            if dev is None:
+                dev = sd.default.device[0]
+            info["input_device"] = sd.query_devices(dev)["name"]
+        except Exception:
+            info["input_device"] = "?"
+        os.makedirs(os.path.dirname(SESSIONS_DIR), exist_ok=True)
+        with open(os.path.join(os.path.dirname(SESSIONS_DIR), "mic-diagnostic.json"), "w") as f:
+            json.dump(info, f, indent=2)
 
 
 def input_devices():
@@ -481,6 +515,9 @@ def run_overlay(config, echo=False, dock=False):
             self.listen_started = None
             self.last_loud = 0.0
             self.max_rms = 0
+            self.boot_time = time.time()
+            self.tcc_checked = False
+            self.mic_denied = False
             self._new_session()
             self.last_autosave = time.time()
             self.panel = None
@@ -566,7 +603,15 @@ def run_overlay(config, echo=False, dock=False):
             gear.setBezelStyle_(NSBezelStyleRounded)
             gear.setTarget_(self)
             gear.setAction_(b"openSettings:")
+            gear.setToolTip_("Settings (⌘,)")
             view.addSubview_(gear)
+            hist = NSButton.alloc().initWithFrame_(NSMakeRect(W - 88, y - 4, 26, 22))
+            hist.setTitle_("◷")
+            hist.setBezelStyle_(NSBezelStyleRounded)
+            hist.setTarget_(self)
+            hist.setAction_(b"openHistory:")
+            hist.setToolTip_("Session History (⌘Y)")
+            view.addSubview_(hist)
             # big row: total (left) + score (right)
             y -= 2 + 54
             self.total_lbl = label(view, PAD - 2, y, 120, 54, 44, FG,
@@ -777,6 +822,27 @@ def run_overlay(config, echo=False, dock=False):
                     self.air_lbl.setStringValue_(
                         "⚠ mic silent — check Microphone permission")
                     self.air_lbl.setTextColor_(AMBER)
+            # one-time mic authorization check (3s after boot, past the async
+            # permission request). If denied, tell the user and take them
+            # straight to the right Settings pane.
+            if not self.tcc_checked and now - self.boot_time > 3:
+                self.tcc_checked = True
+                try:
+                    import AVFoundation
+                    st = AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(
+                        AVFoundation.AVMediaTypeAudio)
+                    if st == 2:  # denied
+                        self.mic_denied = True
+                        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(
+                            "x-apple.systempreferences:com.apple.preference.security"
+                            "?Privacy_Microphone"))
+                except Exception:
+                    pass
+            if self.mic_denied:
+                self.air_lbl.setStringValue_(
+                    "⚠ mic DENIED — enable Filler Killer in Settings, relaunch")
+                self.air_lbl.setTextColor_(ACCENT)
+                self.dot.setTextColor_(ACCENT)
             # autosave the session twice a minute
             if now - self.last_autosave > 30:
                 self.last_autosave = now
@@ -984,7 +1050,7 @@ def run_overlay(config, echo=False, dock=False):
                 NSApp.activateIgnoringOtherApps_(True)
                 self.about_win.makeKeyAndOrderFront_(None)
                 return
-            AW, AH = 420, 470
+            AW, AH = 440, 560
             win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(0, 0, AW, AH),
                 NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -994,11 +1060,12 @@ def run_overlay(config, echo=False, dock=False):
             win.setLevel_(NSFloatingWindowLevel)
             v = win.contentView()
 
-            mark_path = os.path.join(HERE, "assets", "filler-killer-mark.svg")
-            img = NSImage.alloc().initWithContentsOfFile_(mark_path)
+            # full brand lockup (mark + wordmark + tagline)
+            logo_path = os.path.join(HERE, "assets", "filler-killer-logo.svg")
+            img = NSImage.alloc().initWithContentsOfFile_(logo_path)
             if img is not None:
                 iv = NSImageView.alloc().initWithFrame_(
-                    NSMakeRect((AW - 110) / 2, AH - 140, 110, 110))
+                    NSMakeRect((AW - 270) / 2, AH - 290, 270, 270))
                 iv.setImage_(img)
                 v.addSubview_(iv)
 
@@ -1017,12 +1084,10 @@ def run_overlay(config, echo=False, dock=False):
                 v.addSubview_(f)
                 return f
 
-            alabel(AH - 175, 26, 21, "Filler Killer", bold=True)
-            alabel(AH - 197, 18, 13, "slay what you say", dim=True)
-            alabel(AH - 220, 16, 11,
+            alabel(AH - 318, 16, 11,
                    f"v{__version__} · 100% local · no cloud, no tokens · MIT",
                    dim=True)
-            alabel(78, 158, 12, ABOUT_TEXT, wrap=True)
+            alabel(64, 230, 12, ABOUT_TEXT, wrap=True)
 
             gh = button(v, AW - 130, 16, 102, "GitHub", self, b"openGitHub:")
             gh.setToolTip_(GITHUB_URL)

@@ -158,6 +158,23 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 | `graph.bucket_seconds` | Timeline graph interval (default 30). |
 | `window`, `alert` | Position, opacity, flash, rate window. |
 
+## Accessibility
+
+Built to WCAG 2.1 AA principles:
+
+- **Contrast**: all text meets 4.5:1 against the panel background (measured,
+  not eyeballed — the muted labels are 5.0:1, alerts 6.2:1, body text 15.7:1);
+  graph elements meet the 3:1 non-text minimum.
+- **Not color alone**: the mic status indicator changes shape as well as color
+  (● hearing you · ○ listening, quiet · ✕ problem); rate/score severity is
+  always also conveyed by the number itself.
+- **Full keyboard access** via the menu bar: Settings **⌘,** · History **⌘Y**
+  · Pause/Resume **⌘P** · End Session **⌘E** · Show/Hide Word List **⌘L** ·
+  Quit **⌘Q**.
+- **VoiceOver**: every icon-only button, value readout, and chart carries a
+  descriptive accessibility label (e.g. the timeline reads as "Filler
+  timeline: bar height is fillers per 30-second interval").
+
 ## Privacy
 
 Offline by design. No network calls at runtime, no telemetry, no stored

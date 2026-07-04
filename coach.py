@@ -415,7 +415,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.3.3"
+__version__ = "1.4.0"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -536,7 +536,7 @@ def run_overlay(config, echo=False, dock=False):
         def drawRect_(self, rect):
             b = self.bounds()
             w, h = b.size.width, b.size.height
-            DIM.colorWithAlphaComponent_(0.35).setFill()
+            DIM.colorWithAlphaComponent_(0.6).setFill()
             NSBezierPath.fillRect_(NSMakeRect(0, 0, w, 1))
             n = len(self.buckets)
             if n == 0:
@@ -548,7 +548,7 @@ def run_overlay(config, echo=False, dock=False):
             for i, c in enumerate(self.buckets):
                 x = i * (bw + gap)
                 if c <= 0:
-                    DIM.colorWithAlphaComponent_(0.25).setFill()
+                    DIM.colorWithAlphaComponent_(0.7).setFill()
                     NSBezierPath.fillRect_(NSMakeRect(x, 1, max(1.0, bw), 2))
                     continue
                 rate = c * per_min
@@ -635,6 +635,15 @@ def run_overlay(config, echo=False, dock=False):
 
         # ---- helpers ----
         @objc.python_method
+        def _set_dot(self, sym, color, a11y):
+            state = (sym, a11y)
+            if state != getattr(self, "_dot_state", None):
+                self._dot_state = state
+                self.dot.setStringValue_(sym)
+                self.dot.setAccessibilityLabel_("microphone status: " + a11y)
+            self.dot.setTextColor_(color)
+
+        @objc.python_method
         def active_time(self):
             if self.paused:
                 return self.elapsed_accum
@@ -674,7 +683,7 @@ def run_overlay(config, echo=False, dock=False):
                 top = None  # resolved after we know screen height
 
             rows = self.sorted_counts() if self.expanded else []
-            H = (10 + 16 + 2 + 54 + 14 + 6 + 16 + 16 + 6 +
+            H = (10 + 26 + 2 + 54 + 14 + 6 + 16 + 16 + 6 +
                  GRAPH_H + 6 + 18 + len(rows) * ROW_H + 8 + 26 + 12)
 
             style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
@@ -699,14 +708,22 @@ def run_overlay(config, echo=False, dock=False):
 
             y = H - 10
             # header
-            y -= 16
-            label(view, PAD, y, 120, 16, 10, DIM, weight_bold=True, text="FILLER KILLER")
-            self.dot = label(view, W - 28, y - 1, 14, 16, 13, DIM, text="●")
+            y -= 26
+            label(view, PAD, y + 6, 120, 16, 10, DIM, weight_bold=True, text="FILLER KILLER")
+            self.dot = label(view, W - 26, y + 5, 16, 16, 13, DIM, text="○")
+            self._dot_state = None
             def sym_btn(x, symbol, fallback, action, tip):
-                b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y - 4, 28, 22))
+                b = NSButton.alloc().initWithFrame_(NSMakeRect(x, y - 1, 34, 26))
                 img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
                     symbol, None)
                 if img is not None:
+                    try:
+                        from Cocoa import NSImageSymbolConfiguration
+                        img = img.imageWithSymbolConfiguration_(
+                            NSImageSymbolConfiguration.
+                            configurationWithPointSize_weight_(13.0, 0.0))
+                    except Exception:
+                        pass
                     b.setImage_(img)
                     b.setTitle_("")
                 else:
@@ -715,29 +732,35 @@ def run_overlay(config, echo=False, dock=False):
                 b.setTarget_(self)
                 b.setAction_(action)
                 b.setToolTip_(tip)
+                b.setAccessibilityLabel_(tip.split(" (")[0])
                 view.addSubview_(b)
                 return b
 
-            sym_btn(W - 60, "gearshape", "⚙", b"openSettings:", "Settings (⌘,)")
-            sym_btn(W - 92, "clock.arrow.circlepath", "H", b"openHistory:",
+            sym_btn(W - 64, "gearshape", "⚙", b"openSettings:", "Settings (⌘,)")
+            sym_btn(W - 102, "clock.arrow.circlepath", "H", b"openHistory:",
                     "Session History (⌘Y)")
             # big row: total (left) + score (right)
             y -= 2 + 54
             self.total_lbl = label(view, PAD - 2, y, 120, 54, 44, FG,
                                    weight_bold=True, text=str(self.total))
+            self.total_lbl.setAccessibilityLabel_("total fillers this session")
             self.score_lbl = label(view, W - 130, y, 114, 54, 44, DIM,
                                    weight_bold=True, align_right=True, text="—")
+            self.score_lbl.setAccessibilityLabel_("speaking score out of 100")
             y -= 14
             label(view, PAD, y, 120, 14, 10, DIM, text="fillers")
             label(view, W - 130, y, 114, 14, 10, DIM, align_right=True, text="score")
             # rate + timer
             y -= 6 + 16
             self.rate_lbl = label(view, PAD, y, 120, 16, 12, OK, mono=True, text="0.0 / min")
+            self.rate_lbl.setAccessibilityLabel_("filler rate per minute")
             self.timer_lbl = label(view, W - 90, y, 74, 16, 12, DIM, mono=True,
                                    align_right=True, text="00:00")
+            self.timer_lbl.setAccessibilityLabel_("session length")
             # airtime stats / warning line
             y -= 16
             self.air_lbl = label(view, PAD, y, W - 2 * PAD, 16, 11, DIM, mono=True, text="")
+            self.air_lbl.setAccessibilityLabel_("airtime and status messages")
             # graph (above the words)
             y -= 6 + GRAPH_H
             gv = GraphView.alloc().initWithFrame_(
@@ -746,6 +769,13 @@ def run_overlay(config, echo=False, dock=False):
             if self.graph is not None:
                 gv.buckets = self.graph.buckets
             view.addSubview_(gv)
+            try:
+                gv.setAccessibilityElement_(True)
+                gv.setAccessibilityLabel_(
+                    "Filler timeline: bar height is fillers per "
+                    f"{gv.bucket_seconds}-second interval")
+            except Exception:
+                pass
             self.graph = gv
             # words accordion
             y -= 6 + 18
@@ -806,6 +836,8 @@ def run_overlay(config, echo=False, dock=False):
                 NSAttributedString.alloc().initWithString_attributes_(
                     " " + title, {NSFontAttributeName: NSFont.systemFontOfSize_(11),
                                   NSForegroundColorAttributeName: DIM}))
+            self.acc_btn.setAccessibilityLabel_(
+                ("collapse" if self.expanded else "expand") + " word breakdown — " + title)
             for (name, cnt), phrase in zip(self.row_lbls, ordered):
                 name.setStringValue_(f"“{phrase}”")
                 cnt.setStringValue_(str(self.counts.get(phrase, 0)))
@@ -820,10 +852,10 @@ def run_overlay(config, echo=False, dock=False):
                     if kind == "status":
                         self.mic_ok = True
                         self.listen_started = now
-                        self.dot.setTextColor_(OK)
+                        self._set_dot("○", OK, "listening")
                     elif kind == "error":
                         self.mic_ok = False
-                        self.dot.setTextColor_(ACCENT)
+                        self._set_dot("✕", ACCENT, "audio error")
                         self.total_lbl.setStringValue_("!")
                         print(evt[1])
                     elif kind == "level":
@@ -938,9 +970,9 @@ def run_overlay(config, echo=False, dock=False):
             # what a missing/denied Microphone permission looks like)
             if self.mic_ok:
                 if now - self.last_loud < 0.8:
-                    self.dot.setTextColor_(OK)
+                    self._set_dot("●", OK, "hearing audio")
                 else:
-                    self.dot.setTextColor_(OK.colorWithAlphaComponent_(0.35))
+                    self._set_dot("○", DIM, "listening, quiet")
                 if (self.max_rms < 10 and self.listen_started
                         and now - self.listen_started > 6):
                     self.air_lbl.setStringValue_(
@@ -966,7 +998,7 @@ def run_overlay(config, echo=False, dock=False):
                 self.air_lbl.setStringValue_(
                     "⚠ mic DENIED — enable Filler Killer in Settings, relaunch")
                 self.air_lbl.setTextColor_(ACCENT)
-                self.dot.setTextColor_(ACCENT)
+                self._set_dot("✕", ACCENT, "microphone access denied")
             # auto-end: a meaningful session followed by long silence means
             # the call is over — save it and start fresh for the next one
             auto_min = self.cfg.get("session", {}).get("auto_end_minutes", 3)
@@ -1043,6 +1075,9 @@ def run_overlay(config, echo=False, dock=False):
         # ---- actions ----
         def toggleWords_(self, sender):
             self.expanded = not self.expanded
+            if getattr(self, "words_item", None) is not None:
+                self.words_item.setTitle_(
+                    "Hide Word List" if self.expanded else "Show Word List")
             self._build_window()
 
         def togglePause_(self, sender):
@@ -1057,6 +1092,8 @@ def run_overlay(config, echo=False, dock=False):
                 if self.speech_start is not None:
                     self._end_turn()
                 self.pause_btn.setTitle_("Resume")
+            if getattr(self, "pause_item", None) is not None:
+                self.pause_item.setTitle_("Resume" if self.paused else "Pause")
 
         def reset_(self, sender):
             if self._session_meaningful():
@@ -1121,6 +1158,7 @@ def run_overlay(config, echo=False, dock=False):
             tv.setString_("\n".join(self.cfg.get("fillers", [])))
             scroll.setDocumentView_(tv)
             v.addSubview_(scroll)
+            tv.setAccessibilityLabel_("word fillers, one per line")
             self.tv_fillers = tv
 
             y -= 30
@@ -1129,6 +1167,7 @@ def run_overlay(config, echo=False, dock=False):
             y -= 26
             ac = NSTextField.alloc().initWithFrame_(NSMakeRect(20, y, SW - 40, 24))
             ac.setStringValue_(" ".join(self.cfg.get("acoustic_fillers", ["um", "uh"])))
+            ac.setAccessibilityLabel_("sound fillers, space separated")
             v.addSubview_(ac)
             self.tf_acoustic = ac
 
@@ -1145,6 +1184,7 @@ def run_overlay(config, echo=False, dock=False):
             ])
             pop.selectItemAtIndex_({"off": 0, "short": 1, "medium": 2}.get(
                 mono.get("mode", "off"), 0))
+            pop.setAccessibilityLabel_("airtime warning mode")
             v.addSubview_(pop)
             self.pop_mono = pop
 
@@ -1162,6 +1202,7 @@ def run_overlay(config, echo=False, dock=False):
                 if cur == i:
                     sel = n + 1
             mpop.selectItemAtIndex_(sel)
+            mpop.setAccessibilityLabel_("microphone device")
             v.addSubview_(mpop)
             self.pop_mic = mpop
             self._mic_devs = devs
@@ -1314,6 +1355,11 @@ def run_overlay(config, echo=False, dock=False):
             lbl.setStringValue_("Score over time  (oldest → newest)")
             v.addSubview_(lbl)
             spark = SparkView.alloc().initWithFrame_(NSMakeRect(20, HH - 92, HW - 40, 56))
+            try:
+                spark.setAccessibilityElement_(True)
+                spark.setAccessibilityLabel_("score over time chart, oldest to newest")
+            except Exception:
+                pass
             v.addSubview_(spark)
             self.hist_spark = spark
 
@@ -1504,6 +1550,10 @@ def run_overlay(config, echo=False, dock=False):
     ec_item = mitem("Echo Cancellation", b"toggleEchoCancel:", "")
     ec_item.setState_(1 if config.get("echo_cancel", True) else 0)
     controller.ec_item = ec_item
+    app_menu.addItem_(NSMenuItem.separatorItem())
+    controller.pause_item = mitem("Pause", b"togglePause:", "p")
+    mitem("End Session", b"reset:", "e")
+    controller.words_item = mitem("Show Word List", b"toggleWords:", "l")
     app_menu.addItem_(NSMenuItem.separatorItem())
     mitem("Quit Filler Killer", b"quit:", "q")
     app_item.setSubmenu_(app_menu)

@@ -136,7 +136,8 @@ AC_MAX_DUR = 2.0     # seconds — reject long [unk]-like stretches
 AC_MIN_CONF = 0.7
 
 
-def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False):
+def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False,
+                  ac_min_dur=AC_MIN_DUR, ac_min_conf=AC_MIN_CONF):
     """Feed one audio block through both recognizers; emit events to `out`."""
     # word pass
     if rec_word.AcceptWaveform(data):
@@ -169,7 +170,7 @@ def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False):
             word = w.get("word")
             dur = w.get("end", 0) - w.get("start", 0)
             conf = w.get("conf", 0)
-            if word in ac_set and AC_MIN_DUR <= dur <= AC_MAX_DUR and conf >= AC_MIN_CONF:
+            if word in ac_set and ac_min_dur <= dur <= AC_MAX_DUR and conf >= ac_min_conf:
                 if echo:
                     print(f"heard (acoustic): {word} ({dur:.2f}s conf {conf:.2f})", flush=True)
                 counts[word] = counts.get(word, 0) + 1
@@ -277,6 +278,9 @@ class Listener(threading.Thread):
             return False
 
         self.backend = "voice-processing (echo cancel)"
+        # VP noise suppression trims soft/short filled pauses; compensate with
+        # a slightly laxer acoustic gate (VP audio is cleaner, so FP risk stays low)
+        self._ac_dur, self._ac_conf = 0.10, 0.6
         self.out.put(("status", "listening"))
         ac_set = set(self.acoustic)
         state = None
@@ -302,7 +306,8 @@ class Listener(threading.Thread):
                     diag_done = True
                     self._write_diagnostic(None, max_rms)
                 process_block(data, rec_word, rec_ac, self.matchers,
-                              ac_set, self.out, echo=self.echo)
+                              ac_set, self.out, echo=self.echo,
+                              ac_min_dur=self._ac_dur, ac_min_conf=self._ac_conf)
         except Exception as e:
             self.out.put(("error", f"Audio error: {e}"))
         finally:
@@ -415,7 +420,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (

@@ -137,6 +137,10 @@ du -sh "$APP" | awk '{print "==> Built " $2 " (" $1 ")"}'
 
 if [ "${1:-}" = "--install" ]; then
   echo "==> Installing to /Applications"
+  # stop any running copy first — replacing the bundle under a live app
+  # orphans it, and the next open would start a SECOND instance whose
+  # voice-processing engine can't start while the orphan holds the mic
+  pkill -f "FillerKiller.app/Contents" 2>/dev/null && sleep 1 || true
   rm -rf /Applications/FillerKiller.app /Applications/FillerCoach.app  # drop pre-rebrand app too
   ditto "$APP" /Applications/FillerKiller.app
   # clear any stale auto-denied mic decision so the prompt can appear

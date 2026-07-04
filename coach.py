@@ -241,6 +241,20 @@ class Listener(threading.Thread):
             ok, _ = inp.setVoiceProcessingEnabled_error_(True, None)
             if not ok:
                 return False
+            # Voice processing ducks ALL other system audio by default, which
+            # would make your callers quieter while the app runs. Dial it to
+            # the minimum, voice-activity-only mode (macOS 14+; harmless no-op
+            # earlier). AEC itself is unaffected by the ducking level.
+            self.duck_minimized = False
+            try:
+                from AVFoundation import (
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration)
+                inp.setVoiceProcessingOtherAudioDuckingConfiguration_(
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                        True, 10))  # advanced (VAD-gated), level = Min
+                self.duck_minimized = True
+            except Exception:
+                pass
             fmt = inp.outputFormatForBus_(0)
             sr = int(fmt.sampleRate())
             aq = queue.Queue()
@@ -399,7 +413,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (

@@ -26,8 +26,12 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "config.json")
-MODEL_DIR = os.path.join(HERE, "model")
+# Overridable for package managers (Homebrew): the install prefix is wiped on
+# upgrade, so user settings must live outside it and the model can be shared.
+CONFIG_PATH = os.environ.get("FILLER_KILLER_CONFIG",
+                             os.path.join(HERE, "config.json"))
+DEFAULT_CONFIG_PATH = os.path.join(HERE, "config.json")
+MODEL_DIR = os.environ.get("FILLER_KILLER_MODEL", os.path.join(HERE, "model"))
 SAMPLE_RATE = 16000
 
 
@@ -35,6 +39,11 @@ SAMPLE_RATE = 16000
 # Config + filler matching (pure logic)
 # --------------------------------------------------------------------------
 def load_config():
+    if not os.path.exists(CONFIG_PATH) and os.path.exists(DEFAULT_CONFIG_PATH):
+        # first run under a package manager: seed user config from the default
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(DEFAULT_CONFIG_PATH) as src, open(CONFIG_PATH, "w") as dst:
+            dst.write(src.read())
     with open(CONFIG_PATH, "r") as f:
         return json.load(f)
 
@@ -420,7 +429,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (

@@ -24,6 +24,7 @@ finally stop saying them.
 <p align="center">
 <img width="326" height="443" alt="Filler Killer Screenshot" src="https://github.com/user-attachments/assets/989fb71d-9d06-4396-a24b-1bee9f8c821d" />
 </p>
+
 ## Features
 
 - **Big live counter** — flashes amber (red when your rate is high) on each
@@ -59,7 +60,19 @@ finally stop saying them.
 - **Dock app** — `FillerKiller.app` with a real menu bar
   (About / Settings / Session History / Quit).
 
-## Install (one time)
+## Install
+
+### Homebrew (easiest)
+
+```bash
+brew install mattbakerpm/tap/filler-killer
+filler-killer        # launches the floating overlay
+```
+
+Settings live in `~/Library/Application Support/FillerKiller/config.json`
+(created on first run; the in-app ⚙ edits it).
+
+### From source
 
 Requires macOS + [Homebrew](https://brew.sh).
 

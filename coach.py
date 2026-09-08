@@ -429,7 +429,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -489,7 +489,7 @@ def run_overlay(config, echo=False, dock=False):
     from Cocoa import (
         NSApplication, NSApp, NSPanel, NSWindow, NSView, NSTextField, NSTextView,
         NSScrollView, NSButton, NSPopUpButton, NSColor, NSFont, NSBezierPath,
-        NSObject, NSTimer, NSMakeRect,
+        NSObject, NSTimer, NSMakeRect, NSMakeSize,
         NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular,
         NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel,
         NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
@@ -500,6 +500,8 @@ def run_overlay(config, echo=False, dock=False):
         NSMenu, NSMenuItem, NSImage, NSImageView, NSTableView, NSTableColumn,
         NSWorkspace, NSURL, NSAttributedString, NSPNGFileType, NSButtonTypeSwitch,
         NSFontAttributeName, NSForegroundColorAttributeName, NSImageLeft,
+        NSBitmapImageRep, NSGraphicsContext, NSDeviceRGBColorSpace,
+        NSCompositingOperationSourceOver,
     )
     from Foundation import NSBundle
 
@@ -645,7 +647,48 @@ def run_overlay(config, echo=False, dock=False):
                 0.1, self, b"poll:", None, True)
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 0.2, self, b"tick:", None, True)
+            # Fixing the Dock icon has to happen once the run loop is pumping
+            # (Cocoa's own launch-time Dock registration otherwise clobbers an
+            # override set before app.run() starts) — a short-delay one-shot
+            # timer, not a direct call here, is what makes it stick.
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.1, self, b"applyIcon:", None, False)
             return self
+
+        # The GUI process is a Python interpreter, so without this the Dock
+        # icon would be Python's own (some distributions, e.g. Homebrew's,
+        # bundle a full Python.app wrapper with its own rocket-ship icon,
+        # which otherwise wins over this bundle's icon since it's the
+        # process actually running NSApplication). Building an NSImage with
+        # explicit reps at each size Dock/Cmd-Tab/Finder actually request
+        # (rather than handing over one raw SVG) avoids soft/blurry scaling.
+        def applyIcon_(self, timer):
+            try:
+                mark_path = os.path.join(HERE, "assets", "filler-killer-mark.svg")
+                mark = NSImage.alloc().initWithContentsOfFile_(mark_path)
+                if mark is None:
+                    return
+                icon = NSImage.alloc().initWithSize_(NSMakeSize(512, 512))
+                icon.lockFocus()
+                mark.drawInRect_fromRect_operation_fraction_(
+                    NSMakeRect(0, 0, 512, 512),
+                    NSMakeRect(0, 0, mark.size().width, mark.size().height),
+                    NSCompositingOperationSourceOver, 1.0)
+                icon.unlockFocus()
+                for sz in (16, 32, 128, 256, 512):
+                    rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+                        None, sz, sz, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+                    ctx = NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+                    NSGraphicsContext.setCurrentContext_(ctx)
+                    mark.drawInRect_fromRect_operation_fraction_(
+                        NSMakeRect(0, 0, sz, sz),
+                        NSMakeRect(0, 0, mark.size().width, mark.size().height),
+                        NSCompositingOperationSourceOver, 1.0)
+                    NSGraphicsContext.setCurrentContext_(None)
+                    icon.addRepresentation_(rep)
+                NSApp.setApplicationIconImage_(icon)
+            except Exception:
+                pass
 
         # ---- helpers ----
         @objc.python_method

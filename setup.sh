@@ -36,9 +36,17 @@ fi
 MODEL_DIR="model"
 MODEL_NAME="vosk-model-small-en-us-0.15"
 MODEL_URL="https://alphacephei.com/vosk/models/${MODEL_NAME}.zip"
+# Pinned to match the Homebrew formula's resource checksum. Update both together.
+MODEL_SHA256="30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"
 if [ ! -d "$MODEL_DIR" ]; then
   echo "==> Downloading Vosk model (~40MB): $MODEL_NAME"
-  curl -L -o model.zip "$MODEL_URL"
+  curl -fL -o model.zip "$MODEL_URL"
+  echo "==> Verifying checksum"
+  echo "${MODEL_SHA256}  model.zip" | shasum -a 256 -c - || {
+    echo "!! Model checksum mismatch — refusing this download." >&2
+    rm -f model.zip
+    exit 1
+  }
   echo "==> Unzipping model"
   unzip -q model.zip
   mv "$MODEL_NAME" "$MODEL_DIR"

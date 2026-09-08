@@ -154,13 +154,20 @@ def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False,
     """Feed one audio block through both recognizers; emit events to `out`."""
     # word pass
     if rec_word.AcceptWaveform(data):
-        text = json.loads(rec_word.Result()).get("text", "")
+        res = json.loads(rec_word.Result())
+        text = res.get("text", "")
         if text:
-            if echo:
-                print(f"heard: {text}", flush=True)
             toks = normalize(text)
+            # utterance duration from Vosk's own word timestamps (first word
+            # start -> last word end) so pace doesn't depend on wall-clock
+            # turn tracking, which only ticks at utterance boundaries
+            wt = res.get("result", [])
+            spoken = (wt[-1].get("end", 0) - wt[0].get("start", 0)) if wt else 0.0
+            if echo:
+                pace = f" → {len(toks) * 60.0 / spoken:.0f} wpm" if spoken > 0 else ""
+                print(f"heard: {text}  [{len(toks)} words / {spoken:.1f}s{pace}]", flush=True)
             out.put(("speech",))
-            out.put(("words", len(toks)))
+            out.put(("words", len(toks), max(0.0, spoken)))
             counts = count_fillers(toks, matchers)
             # um/uh style fillers are counted by the acoustic pass; drop them
             # here in case a model ever does emit them (avoids double count)
@@ -225,7 +232,7 @@ class Listener(threading.Thread):
         try:
             model = Model(MODEL_DIR)
             rec_word = KaldiRecognizer(model, SAMPLE_RATE)
-            rec_word.SetWords(False)
+            rec_word.SetWords(True)     # word timestamps feed the pace (wpm) readout
             rec_ac = KaldiRecognizer(model, SAMPLE_RATE,
                                      json.dumps(self.acoustic + ["[unk]"]))
             rec_ac.SetWords(True)
@@ -428,7 +435,7 @@ def airtime_limit(cfg):
 # --------------------------------------------------------------------------
 # Pace (words-per-minute) tracking
 # --------------------------------------------------------------------------
-PACE_MIN_SPAN = 5.0   # seconds of talking before a wpm reading is trusted
+PACE_MIN_SPAN = 4.0   # seconds of timed speech before a wpm reading is trusted
 
 
 def pace_limit(cfg):
@@ -442,13 +449,19 @@ def pace_limit(cfg):
     return None
 
 
-def trailing_wpm(word_times, now, window, span):
-    """Words per minute over the trailing `window`, measured against `span`
-    seconds of actual talking (so other people's silence doesn't deflate it)."""
-    n = sum(c for t, c in word_times if t >= now - window)
-    if n == 0 or span < PACE_MIN_SPAN:
+def trailing_wpm(word_times, now, window):
+    """Words per minute over utterances that finished in the trailing `window`.
+    Each entry is (finished_at, n_words, spoken_seconds) where spoken_seconds
+    comes from the recognizer's word timestamps, so pauses between utterances
+    and other people's talking never dilute or inflate the reading."""
+    n = dur = 0.0
+    for t, c, d in word_times:
+        if t >= now - window:
+            n += c
+            dur += d
+    if n == 0 or dur < PACE_MIN_SPAN:
         return 0.0
-    return n * 60.0 / min(window, span)
+    return n * 60.0 / dur
 
 
 def fmt_mmss(seconds):
@@ -459,7 +472,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -646,7 +659,7 @@ def run_overlay(config, echo=False, dock=False):
             self.turns = []             # completed talking-turn durations
             self.long_turns = 0
             self.word_times = []        # (timestamp, n words) for trailing wpm
-            self.talk_seconds = 0.0     # total own talking time (all turns)
+            self.spoken_seconds = 0.0   # total timed speech (from word timestamps)
             self.fast_episodes = 0      # times pace crossed the limit
             self.fast_flagged = False
             self.last_wpm = 0.0
@@ -967,7 +980,8 @@ def run_overlay(config, echo=False, dock=False):
                         self._apply(evt[1])
                     elif kind == "words":
                         self.words_total += evt[1]
-                        self.word_times.append((now, evt[1]))
+                        self.word_times.append((now, evt[1], evt[2]))
+                        self.spoken_seconds += evt[2]
                     elif kind == "partial":
                         if evt[1] and self.cfg.get("alert", {}).get("flash_on_filler", True):
                             self._set_flash(now, 0.3)
@@ -1039,12 +1053,12 @@ def run_overlay(config, echo=False, dock=False):
             # pace: trailing words-per-minute over own talking time
             pace_cfg = self.cfg.get("pace", {})
             pw = float(pace_cfg.get("window_seconds", 30))
-            self.word_times = [(t, c) for t, c in self.word_times if t >= now - pw]
+            self.word_times = [e for e in self.word_times if e[0] >= now - pw]
             wlimit = pace_limit(self.cfg)
             stat_wlimit = wlimit or float(pace_cfg.get("relaxed_wpm", 220))
-            wpm = 0.0
-            if talking:
-                wpm = trailing_wpm(self.word_times, now, pw, now - self.speech_start)
+            wpm = 0.0 if self.paused else trailing_wpm(self.word_times, now, pw)
+            if wpm == 0.0 and talking:
+                wpm = self.last_wpm     # mid-sentence: hold the last reading
             self.last_wpm = wpm
             if wpm > 0:
                 self.wpm_lbl.setStringValue_(f"{int(round(wpm))} wpm")
@@ -1166,9 +1180,7 @@ def run_overlay(config, echo=False, dock=False):
             limit = airtime_limit(self.cfg)
             wlimit = pace_limit(self.cfg)
             med = statistics.median(self.turns) if self.turns else None
-            talk = self.talk_seconds
-            if self.speech_start is not None:
-                talk += max(0.0, self.last_speech - self.speech_start)
+            talk = self.spoken_seconds
             avg_wpm = round(self.words_total * 60.0 / talk) if talk >= PACE_MIN_SPAN else None
             write_session({
                 "id": self.session_id,
@@ -1196,7 +1208,6 @@ def run_overlay(config, echo=False, dock=False):
             dur = self.last_speech - self.speech_start
             if dur >= MIN_TURN:
                 self.turns.append(dur)
-            self.talk_seconds += max(0.0, dur)
             self.speech_start = None
             self.run_flagged = False
             self.fast_flagged = False
@@ -1250,7 +1261,7 @@ def run_overlay(config, echo=False, dock=False):
             self.long_turns = 0
             self.run_flagged = False
             self.word_times = []
-            self.talk_seconds = 0.0
+            self.spoken_seconds = 0.0
             self.fast_episodes = 0
             self.fast_flagged = False
             self.last_wpm = 0.0
@@ -1613,7 +1624,7 @@ def run_overlay(config, echo=False, dock=False):
                 self._apply({"um": 2, "like": 1})   # give the UI real content
                 now = time.time()                   # ...and a fast talking turn
                 self.speech_start, self.last_speech = now - 12, now
-                self.word_times = [(now - 9, 30), (now - 2, 30)]
+                self.word_times = [(now - 9, 30, 6.0), (now - 2, 30, 6.0)]
             elif step in (1, 3):
                 v = self.panel.contentView()
                 rep = v.bitmapImageRepForCachingDisplayInRect_(v.bounds())
@@ -1671,7 +1682,7 @@ def run_overlay(config, echo=False, dock=False):
                 now = time.time()
                 self.speech_start = now - 10
                 self.last_speech = now
-                self.word_times = [(now - 8, 25), (now - 3, 25)]
+                self.word_times = [(now - 8, 25, 5.0), (now - 3, 25, 5.0)]
                 self.tick_(None)
                 assert self.last_wpm >= 250, f"wpm not computed: {self.last_wpm}"
                 assert "SLOW DOWN" in str(self.air_lbl.stringValue()), \

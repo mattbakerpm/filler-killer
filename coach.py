@@ -97,7 +97,8 @@ SCORE_MIN_WORDS = 30      # need this many spoken words before scoring
 BURST_WINDOW = 15.0       # fillers within this many seconds count as a burst
 
 
-def compute_score(words, filler_times, long_turns, airtime_scored):
+def compute_score(words, filler_times, long_turns, airtime_scored,
+                  fast_episodes=0, pace_scored=False):
     """
     0–100 composite speaking score, or None if too few words yet.
 
@@ -108,6 +109,8 @@ def compute_score(words, filler_times, long_turns, airtime_scored):
       ones. 0% bursty = 100 pts.
     - airtime (weight .3): long uninterrupted turns. -15 pts each.
       Excluded (weights renormalized) when the airtime warning is off.
+    - pace (weight .2): episodes of talking over the wpm limit. -12 pts each.
+      Excluded (weights renormalized) when the pace warning is off.
     """
     if words < SCORE_MIN_WORDS:
         return None
@@ -119,11 +122,12 @@ def compute_score(words, filler_times, long_turns, airtime_scored):
         burst_score = 100.0 * (1.0 - bursts / (len(ts) - 1))
     else:
         burst_score = 100.0
+    parts = [(0.5, density_score), (0.2, burst_score)]
     if airtime_scored:
-        airtime_score = max(0.0, 100.0 - 15.0 * long_turns)
-        score = 0.5 * density_score + 0.2 * burst_score + 0.3 * airtime_score
-    else:
-        score = (0.5 * density_score + 0.2 * burst_score) / 0.7
+        parts.append((0.3, max(0.0, 100.0 - 15.0 * long_turns)))
+    if pace_scored:
+        parts.append((0.2, max(0.0, 100.0 - 12.0 * fast_episodes)))
+    score = sum(w * v for w, v in parts) / sum(w for w, _ in parts)
     return int(round(score))
 
 
@@ -421,6 +425,32 @@ def airtime_limit(cfg):
     return None
 
 
+# --------------------------------------------------------------------------
+# Pace (words-per-minute) tracking
+# --------------------------------------------------------------------------
+PACE_MIN_SPAN = 5.0   # seconds of talking before a wpm reading is trusted
+
+
+def pace_limit(cfg):
+    """Words-per-minute ceiling, or None if the pace warning is off."""
+    pace = cfg.get("pace", {})
+    mode = pace.get("mode", "relaxed")   # absent (pre-1.5 config) = relaxed
+    if mode == "strict":
+        return float(pace.get("strict_wpm", 180))
+    if mode == "relaxed":
+        return float(pace.get("relaxed_wpm", 220))
+    return None
+
+
+def trailing_wpm(word_times, now, window, span):
+    """Words per minute over the trailing `window`, measured against `span`
+    seconds of actual talking (so other people's silence doesn't deflate it)."""
+    n = sum(c for t, c in word_times if t >= now - window)
+    if n == 0 or span < PACE_MIN_SPAN:
+        return 0.0
+    return n * 60.0 / min(window, span)
+
+
 def fmt_mmss(seconds):
     s = int(seconds)
     return f"{s // 60}:{s % 60:02d}"
@@ -429,7 +459,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.4.3"
+__version__ = "1.5.0"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -615,6 +645,11 @@ def run_overlay(config, echo=False, dock=False):
             self.filler_times = []      # all timestamps, for burstiness
             self.turns = []             # completed talking-turn durations
             self.long_turns = 0
+            self.word_times = []        # (timestamp, n words) for trailing wpm
+            self.talk_seconds = 0.0     # total own talking time (all turns)
+            self.fast_episodes = 0      # times pace crossed the limit
+            self.fast_flagged = False
+            self.last_wpm = 0.0
             self.run_flagged = False
             self.paused = False
             self.expanded = False
@@ -809,9 +844,15 @@ def run_overlay(config, echo=False, dock=False):
             label(view, W - 130, y, 114, 14, 10, DIM, align_right=True, text="score")
             # rate + timer
             y -= 6 + 16
-            self.rate_lbl = label(view, PAD, y, 120, 16, 12, OK, mono=True, text="0.0 / min")
+            self.rate_lbl = label(view, PAD, y, 92, 16, 12, OK, mono=True, text="0.0 / min")
             self.rate_lbl.setAccessibilityLabel_("filler rate per minute")
-            self.timer_lbl = label(view, W - 90, y, 74, 16, 12, DIM, mono=True,
+            self.wpm_lbl = label(view, PAD + 96, y, 84, 16, 12, DIM, mono=True,
+                                 align_right=True, text="— wpm")
+            self.wpm_lbl.setAccessibilityLabel_("speaking pace, words per minute")
+            self.wpm_lbl.setToolTip_("Speaking pace over the last "
+                                     f"{int(self.cfg.get('pace', {}).get('window_seconds', 30))}s "
+                                     "of your own talking")
+            self.timer_lbl = label(view, W - PAD - 58, y, 58, 16, 12, DIM, mono=True,
                                    align_right=True, text="00:00")
             self.timer_lbl.setAccessibilityLabel_("session length")
             # airtime stats / warning line
@@ -926,6 +967,7 @@ def run_overlay(config, echo=False, dock=False):
                         self._apply(evt[1])
                     elif kind == "words":
                         self.words_total += evt[1]
+                        self.word_times.append((now, evt[1]))
                     elif kind == "partial":
                         if evt[1] and self.cfg.get("alert", {}).get("flash_on_filler", True):
                             self._set_flash(now, 0.3)
@@ -994,6 +1036,33 @@ def run_overlay(config, echo=False, dock=False):
                        and now - self.last_speech <= AIRTIME_GAP)
             if not talking and self.speech_start is not None:
                 self._end_turn()
+            # pace: trailing words-per-minute over own talking time
+            pace_cfg = self.cfg.get("pace", {})
+            pw = float(pace_cfg.get("window_seconds", 30))
+            self.word_times = [(t, c) for t, c in self.word_times if t >= now - pw]
+            wlimit = pace_limit(self.cfg)
+            stat_wlimit = wlimit or float(pace_cfg.get("relaxed_wpm", 220))
+            wpm = 0.0
+            if talking:
+                wpm = trailing_wpm(self.word_times, now, pw, now - self.speech_start)
+            self.last_wpm = wpm
+            if wpm > 0:
+                self.wpm_lbl.setStringValue_(f"{int(round(wpm))} wpm")
+                self.wpm_lbl.setTextColor_(
+                    ACCENT if wpm >= stat_wlimit else
+                    AMBER if wpm >= 0.85 * stat_wlimit else OK)
+            else:
+                self.wpm_lbl.setStringValue_("— wpm")
+                self.wpm_lbl.setTextColor_(DIM)
+            too_fast = wpm >= stat_wlimit
+            if too_fast and not self.fast_flagged:
+                self.fast_flagged = True
+                self.fast_episodes += 1
+                if wlimit and self.cfg.get("alert", {}).get("flash_on_filler", True):
+                    self.flash_color = ACCENT
+                    self.flash_until = now + 0.8
+            elif wpm < 0.85 * stat_wlimit:
+                self.fast_flagged = False
             if talking:
                 talk = now - self.speech_start
                 if talk >= stat_limit and not self.run_flagged:
@@ -1001,6 +1070,9 @@ def run_overlay(config, echo=False, dock=False):
                     self.run_flagged = True
                 if limit and talk >= limit:
                     self.air_lbl.setStringValue_(f"◼ WRAP IT UP · {fmt_mmss(talk)}")
+                    self.air_lbl.setTextColor_(ACCENT)
+                elif wlimit and too_fast:
+                    self.air_lbl.setStringValue_(f"▲ SLOW DOWN · {int(round(wpm))} wpm")
                     self.air_lbl.setTextColor_(ACCENT)
                 elif limit and talk >= 0.6 * limit:
                     self.air_lbl.setStringValue_(f"talking {fmt_mmss(talk)}")
@@ -1011,7 +1083,8 @@ def run_overlay(config, echo=False, dock=False):
                 self._show_air_stats()
             # score
             score = compute_score(self.words_total, self.filler_times,
-                                  self.long_turns, limit is not None)
+                                  self.long_turns, limit is not None,
+                                  self.fast_episodes, wlimit is not None)
             if score is None:
                 self.score_lbl.setStringValue_("—")
                 self.score_lbl.setTextColor_(DIM)
@@ -1091,7 +1164,12 @@ def run_overlay(config, echo=False, dock=False):
                 return
             active = self.active_time()
             limit = airtime_limit(self.cfg)
+            wlimit = pace_limit(self.cfg)
             med = statistics.median(self.turns) if self.turns else None
+            talk = self.talk_seconds
+            if self.speech_start is not None:
+                talk += max(0.0, self.last_speech - self.speech_start)
+            avg_wpm = round(self.words_total * 60.0 / talk) if talk >= PACE_MIN_SPAN else None
             write_session({
                 "id": self.session_id,
                 "name": self.session_name,
@@ -1101,8 +1179,11 @@ def run_overlay(config, echo=False, dock=False):
                 "fillers": self.total,
                 "counts": self.counts,
                 "score": compute_score(self.words_total, self.filler_times,
-                                       self.long_turns, limit is not None),
+                                       self.long_turns, limit is not None,
+                                       self.fast_episodes, wlimit is not None),
                 "rate": round(self.total / max(1.0, active / 60.0), 2),
+                "avg_wpm": avg_wpm,
+                "fast_episodes": self.fast_episodes,
                 "turns": len(self.turns),
                 "median_turn": round(med, 1) if med is not None else None,
                 "long_turns": self.long_turns,
@@ -1115,8 +1196,10 @@ def run_overlay(config, echo=False, dock=False):
             dur = self.last_speech - self.speech_start
             if dur >= MIN_TURN:
                 self.turns.append(dur)
+            self.talk_seconds += max(0.0, dur)
             self.speech_start = None
             self.run_flagged = False
+            self.fast_flagged = False
 
         @objc.python_method
         def _show_air_stats(self):
@@ -1126,8 +1209,9 @@ def run_overlay(config, echo=False, dock=False):
                 return
             med = fmt_mmss(statistics.median(self.turns)) if self.turns else "—"
             self.air_lbl.setStringValue_(
-                f"turns {len(self.turns)} · median {med} · long {self.long_turns}")
-            self.air_lbl.setTextColor_(AMBER if self.long_turns else DIM)
+                f"turns {len(self.turns)} · median {med} · long {self.long_turns}"
+                f" · fast {self.fast_episodes}")
+            self.air_lbl.setTextColor_(AMBER if (self.long_turns or self.fast_episodes) else DIM)
 
         # ---- actions ----
         def toggleWords_(self, sender):
@@ -1165,6 +1249,11 @@ def run_overlay(config, echo=False, dock=False):
             self.turns = []
             self.long_turns = 0
             self.run_flagged = False
+            self.word_times = []
+            self.talk_seconds = 0.0
+            self.fast_episodes = 0
+            self.fast_flagged = False
+            self.last_wpm = 0.0
             self.elapsed_accum = 0.0
             self.active_since = time.time()
             self.speech_start = None
@@ -1173,6 +1262,8 @@ def run_overlay(config, echo=False, dock=False):
             self.total_lbl.setStringValue_("0")
             self.score_lbl.setStringValue_("—")
             self.score_lbl.setTextColor_(DIM)
+            self.wpm_lbl.setStringValue_("— wpm")
+            self.wpm_lbl.setTextColor_(DIM)
             self._refresh_words()
 
         def quit_(self, sender):
@@ -1194,7 +1285,7 @@ def run_overlay(config, echo=False, dock=False):
                 NSApp.activateIgnoringOtherApps_(True)
                 self.settings_win.makeKeyAndOrderFront_(None)
                 return
-            SW, SH = 400, 505
+            SW, SH = 400, 541
             win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(0, 0, SW, SH),
                 NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -1244,6 +1335,24 @@ def run_overlay(config, echo=False, dock=False):
             pop.setAccessibilityLabel_("airtime warning mode")
             v.addSubview_(pop)
             self.pop_mono = pop
+
+            y -= 36
+            label(v, 20, y, 200, 16, 12, NSColor.labelColor(), weight_bold=True,
+                  text="Pace warning (slow down)")
+            pace = self.cfg.get("pace", {})
+            ppop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                NSMakeRect(210, y - 4, 170, 26), False)
+            ppop.addItemsWithTitles_([
+                "Off",
+                f"Relaxed (over {int(pace.get('relaxed_wpm', 220))} wpm)",
+                f"Strict (over {int(pace.get('strict_wpm', 180))} wpm)",
+            ])
+            ppop.selectItemAtIndex_({"off": 0, "relaxed": 1, "strict": 2}.get(
+                pace.get("mode", "relaxed"), 1))
+            ppop.setAccessibilityLabel_("pace warning mode")
+            ppop.setToolTip_("Conversational English is roughly 140–170 words per minute")
+            v.addSubview_(ppop)
+            self.pop_pace = ppop
 
             y -= 36
             label(v, 20, y, 200, 16, 12, NSColor.labelColor(), weight_bold=True,
@@ -1426,6 +1535,7 @@ def run_overlay(config, echo=False, dock=False):
                     ("words", "Words", 60, False),
                     ("fillers", "Fillers", 55, False),
                     ("rate", "/min", 50, False),
+                    ("wpm", "wpm", 45, False),
                     ("score", "Score", 50, False)]
             for ident, title, width, editable in cols:
                 c = NSTableColumn.alloc().initWithIdentifier_(ident)
@@ -1479,6 +1589,9 @@ def run_overlay(config, echo=False, dock=False):
                 return "—" if sc is None else str(sc)
             if ident == "rate":
                 return f"{s.get('rate', 0):.1f}"
+            if ident == "wpm":
+                w = s.get("avg_wpm")
+                return "—" if w is None else str(w)
             return str(s.get(ident, ""))
 
         def tableView_setObjectValue_forTableColumn_row_(self, table, value, col, row):
@@ -1498,6 +1611,9 @@ def run_overlay(config, echo=False, dock=False):
             prefix = os.environ.get("FILLER_COACH_SNAPSHOT", "/tmp/fk-panel")
             if step == 0:
                 self._apply({"um": 2, "like": 1})   # give the UI real content
+                now = time.time()                   # ...and a fast talking turn
+                self.speech_start, self.last_speech = now - 12, now
+                self.word_times = [(now - 9, 30), (now - 2, 30)]
             elif step in (1, 3):
                 v = self.panel.contentView()
                 rep = v.bitmapImageRepForCachingDisplayInRect_(v.bounds())
@@ -1514,6 +1630,8 @@ def run_overlay(config, echo=False, dock=False):
             step = getattr(self, "_ex_step", 0)
             self._ex_step = step + 1
             if step == 0:
+                self._ex_pace_idx = {"off": 0, "relaxed": 1, "strict": 2}.get(
+                    self.cfg.get("pace", {}).get("mode", "relaxed"), 1)
                 self.toggleWords_(None)           # expand
             elif step == 1:
                 self._apply({"um": 2, "like": 1})  # counts + flash + graph
@@ -1536,15 +1654,43 @@ def run_overlay(config, echo=False, dock=False):
                 self.openHistory_(None)
                 assert self.hist_table.numberOfRows() >= 1, "history table empty"
                 self.closeHistory_(None)
+                # settings round-trip: pace popup builds and persists its mode
+                self.openSettings_(None)
+                self.pop_pace.selectItemAtIndex_(2)
+                self.saveSettings_(None)
+                assert self.cfg["pace"]["mode"] == "strict", self.cfg.get("pace")
+                assert load_config().get("pace", {}).get("mode") == "strict", \
+                    "pace mode not written to config"
+                self.openSettings_(None)
+                self.pop_pace.selectItemAtIndex_(self._ex_pace_idx)
+                self.saveSettings_(None)
                 delete_session({"_file": self.session_id + ".json"})  # clean up test session
             elif step == 6:
+                # pace alarm: fake a 10s turn with 50 words in the window
+                self.cfg.setdefault("pace", {})["mode"] = "strict"
+                now = time.time()
+                self.speech_start = now - 10
+                self.last_speech = now
+                self.word_times = [(now - 8, 25), (now - 3, 25)]
+                self.tick_(None)
+                assert self.last_wpm >= 250, f"wpm not computed: {self.last_wpm}"
+                assert "SLOW DOWN" in str(self.air_lbl.stringValue()), \
+                    f"pace alarm missing: {self.air_lbl.stringValue()}"
+                assert self.fast_episodes == 1, self.fast_episodes
+                self.tick_(None)
+                assert self.fast_episodes == 1, "episode double-counted"
+                assert "wpm" in str(self.wpm_lbl.stringValue()) and \
+                    "—" not in str(self.wpm_lbl.stringValue()), "wpm label blank"
+                self.cfg["pace"]["mode"] = "off"
+            elif step == 7:
                 # trigger auto-end: meaningful session + fake long silence
                 self.words_total = 100
                 self._ex_old_sid = self.session_id
                 self.last_speech = time.time() - 9999
-            elif step == 7:
+            elif step == 8:
                 assert self.session_id != self._ex_old_sid, "auto-end did not fire"
                 assert self.total == 0, "auto-end did not clear counters"
+                assert self.fast_episodes == 0, "auto-end did not clear pace state"
                 delete_session({"_file": self._ex_old_sid + ".json"})
                 print("EXERCISE OK", flush=True)
 
@@ -1557,6 +1703,8 @@ def run_overlay(config, echo=False, dock=False):
             self.cfg["acoustic_fillers"] = acoustic or ["um", "uh"]
             self.cfg.setdefault("monologue", {})["mode"] = \
                 ["off", "short", "medium"][self.pop_mono.indexOfSelectedItem()]
+            self.cfg.setdefault("pace", {})["mode"] = \
+                ["off", "relaxed", "strict"][self.pop_pace.indexOfSelectedItem()]
             sel = self.pop_mic.indexOfSelectedItem()
             self.cfg["mic_device"] = None if sel <= 0 else self._mic_devs[sel - 1][0]
             self.cfg["echo_cancel"] = bool(self.cb_ec.state())

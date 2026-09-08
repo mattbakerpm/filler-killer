@@ -33,9 +33,17 @@ finally stop saying them.
   - *density* (50%): fillers per 100 spoken words,
   - *spread* (20%): clustered slips score worse than isolated ones,
   - *airtime* (30%): long uninterrupted turns cost points (skipped when the
-    airtime warning is off).
+    airtime warning is off),
+  - *pace* (20%): each stretch of talking over the wpm limit costs points
+    (skipped when the pace warning is off).
   Appears after ~30 spoken words. Green ≥ 85, amber ≥ 65, red below.
 - **Rate per minute**, color-coded: green < 4/min, amber 4–8, red ≥ 8.
+- **Pace (wpm)** — your speaking speed over the last 30s of your own talking
+  (other people's silence doesn't dilute it). Conversational English is
+  ~140–170 wpm; fast talkers slip more fillers because the mouth outruns the
+  plan. Modes: **Off**, **Relaxed** (warn over 220), **Strict** (warn over
+  180). Crossing the limit shows "▲ SLOW DOWN · 300 wpm", flashes the
+  counter red, and counts a *fast* episode in the stats line.
 - **Timeline graph** — fillers per 30s interval, growing left → right and
   compressing so the whole call stays visible. At the end of a call you can see
   at a glance whether you tightened up.
@@ -53,10 +61,10 @@ finally stop saying them.
 - **Session history** (⌘Y) — sessions autosave every 30 seconds (once you've
   said ~30 words) to `~/Library/Application Support/FillerKiller/sessions/`.
   The History window charts your score over time and lists every session's
-  length, words, fillers, rate, and score — double-click a name to rename,
+  length, words, fillers, rate, average wpm, and score — double-click a name to rename,
   select + Delete to remove. Watch yourself improve call over call.
 - **In-app settings** (⌘, or the ⚙ button) — add/remove filler words, pick
-  your mic, set the airtime mode. Saved to `config.json`.
+  your mic, set the airtime and pace modes. Saved to `config.json`.
 - **Dock app** — `FillerKiller.app` with a real menu bar
   (About / Settings / Session History / Quit).
 
@@ -166,6 +174,7 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 | `echo_cancel` | macOS voice-processing echo cancellation — ignore what the Mac's speakers play (default `true`). |
 | `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). Pinning a device disables `echo_cancel`. |
 | `monologue` | Airtime guard: `mode` `off` / `short` / `medium`, plus the two thresholds in seconds. |
+| `pace` | Pace guard: `mode` `off` / `relaxed` / `strict`, `relaxed_wpm` (220), `strict_wpm` (180), `window_seconds` (30). |
 | `session.auto_end_minutes` | Silence minutes before a session auto-ends and saves (default 3, `0` disables). |
 | `graph.bucket_seconds` | Timeline graph interval (default 30). |
 | `window`, `alert` | Position, opacity, flash, rate window. |

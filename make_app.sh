@@ -154,13 +154,12 @@ if [ -n "$SIGN_ID" ]; then
     fi
   done
   echo "==> Signing embedded binaries with: $SIGN_ID"
-  find "$RES/venv" \( -name "*.so" -o -name "*.dylib" \) -print0 |
-    xargs -0 -n1 codesign --force --options runtime --timestamp \
-      --entitlements entitlements.plist --sign "$SIGN_ID"
-  find "$RES/venv/bin" -type f -perm +111 -print0 2>/dev/null |
+  # every Mach-O in the venv, whatever its extension (vosk ships libvosk.dyld)
+  find "$RES/venv" -type f -print0 |
     while IFS= read -r -d '' f; do
-      file "$f" | grep -q Mach-O && codesign --force --options runtime --timestamp \
-        --entitlements entitlements.plist --sign "$SIGN_ID" "$f" || true
+      file -b "$f" | grep -q Mach-O || continue
+      codesign --force --options runtime --timestamp \
+        --entitlements entitlements.plist --sign "$SIGN_ID" "$f"
     done
   echo "==> Signing bundle"
   codesign --force --options runtime --timestamp \

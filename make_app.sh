@@ -61,8 +61,12 @@ cp -R assets "$RES/app/assets"
 echo "==> Copying Vosk model (~40MB)"
 cp -R model "$RES/app/model"
 
+TMPD=$(mktemp -d)
+trap 'rm -rf "$TMPD"' EXIT
+
 # --- icon: brand mark (assets/filler-killer-mark.svg) on a white tile ---
-"$PYBIN" - <<'PY'
+TMPD="$TMPD" "$PYBIN" - <<'PY'
+import os
 from Cocoa import (NSImage, NSMakeRect, NSColor, NSBezierPath,
                    NSMakeSize, NSBitmapImageRep, NSPNGFileType,
                    NSCompositingOperationSourceOver)
@@ -84,16 +88,16 @@ mark.drawInRect_fromRect_operation_fraction_(
 img.unlockFocus()
 rep = NSBitmapImageRep.imageRepWithData_(img.TIFFRepresentation())
 png = rep.representationUsingType_properties_(NSPNGFileType, None)
-png.writeToFile_atomically_("/tmp/fillerkiller_icon.png", True)
+png.writeToFile_atomically_(os.environ["TMPD"] + "/fillerkiller_icon.png", True)
 print("icon rendered from brand mark")
 PY
 
-ICONSET="/tmp/FillerKiller.iconset"
+ICONSET="$TMPD/FillerKiller.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
 for sz in 16 32 128 256 512; do
-  sips -z $sz $sz /tmp/fillerkiller_icon.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+  sips -z $sz $sz $TMPD/fillerkiller_icon.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
   dbl=$((sz*2))
-  sips -z $dbl $dbl /tmp/fillerkiller_icon.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+  sips -z $dbl $dbl $TMPD/fillerkiller_icon.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$RES/AppIcon.icns"
 
@@ -124,7 +128,7 @@ PLIST
 # auto-denies without prompting. A compiled binary that runs python as a CHILD
 # keeps FillerKiller.app as the responsible process, so the mic prompt appears
 # and is attributed to this app.
-cat > /tmp/fillerkiller_launcher.swift <<'SWIFT'
+cat > $TMPD/fillerkiller_launcher.swift <<'SWIFT'
 import Foundation
 
 let exeURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
@@ -150,7 +154,7 @@ do {
 proc.waitUntilExit()
 exit(proc.terminationStatus)
 SWIFT
-swiftc -O /tmp/fillerkiller_launcher.swift -o "$APP/Contents/MacOS/FillerKiller"
+swiftc -O $TMPD/fillerkiller_launcher.swift -o "$APP/Contents/MacOS/FillerKiller"
 
 if [ -n "$SIGN_ID" ]; then
   # Developer ID signing, inside-out: notarization requires every Mach-O in

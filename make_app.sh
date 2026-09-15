@@ -8,12 +8,22 @@
 #
 # Rebuild after changing coach.py to update the app.
 #
-#   ./make_app.sh             build ./FillerKiller.app
-#   ./make_app.sh --install   build + install to /Applications + launch
+#   ./make_app.sh                          build ./FillerKiller.app (ad-hoc signed)
+#   ./make_app.sh --install                build + install to /Applications + launch
+#   ./make_app.sh --sign "Developer ID Application: NAME (TEAMID)"
+#                                          build + Developer ID sign with hardened
+#                                          runtime (then run ./notarize.sh)
 set -euo pipefail
 cd "$(dirname "$0")"
 APP="FillerKiller.app"
 RES="$APP/Contents/Resources"
+BUNDLE_ID="com.mattbakerpm.fillerkiller"
+VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+
+SIGN_ID=""
+if [ "${1:-}" = "--sign" ]; then
+  SIGN_ID="${2:?usage: ./make_app.sh --sign \"Developer ID Application: ...\"}"
+fi
 
 if [ ! -d "model" ]; then
   echo "No ./model found. Run ./setup.sh first."
@@ -84,8 +94,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>FillerKiller</string>
   <key>CFBundleDisplayName</key><string>Filler Killer</string>
-  <key>CFBundleIdentifier</key><string>local.fillerkiller</string>
-  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>FillerKiller</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -130,8 +141,36 @@ exit(proc.terminationStatus)
 SWIFT
 swiftc -O /tmp/fillerkiller_launcher.swift -o "$APP/Contents/MacOS/FillerKiller"
 
-# ad-hoc sign so TCC has a stable code identity for the permission grant
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
+if [ -n "$SIGN_ID" ]; then
+  # Developer ID signing, inside-out: notarization requires every Mach-O in
+  # the bundle (pip wheels' .so/.dylib, the venv python if copied) to carry a
+  # hardened-runtime Developer ID signature before the outer bundle is signed.
+  # notarization forbids symlinks that resolve outside the bundle: replace the
+  # venv's python symlinks with real copies of the interpreter binary
+  for link in "$RES"/venv/bin/python*; do
+    if [ -L "$link" ]; then
+      target=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$link")
+      rm "$link" && cp "$target" "$link"
+    fi
+  done
+  echo "==> Signing embedded binaries with: $SIGN_ID"
+  find "$RES/venv" \( -name "*.so" -o -name "*.dylib" \) -print0 |
+    xargs -0 -n1 codesign --force --options runtime --timestamp \
+      --entitlements entitlements.plist --sign "$SIGN_ID"
+  find "$RES/venv/bin" -type f -perm +111 -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+      file "$f" | grep -q Mach-O && codesign --force --options runtime --timestamp \
+        --entitlements entitlements.plist --sign "$SIGN_ID" "$f" || true
+    done
+  echo "==> Signing bundle"
+  codesign --force --options runtime --timestamp \
+    --entitlements entitlements.plist --sign "$SIGN_ID" "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+  echo "==> Signed. Next: ./notarize.sh"
+else
+  # ad-hoc sign so TCC has a stable code identity for the permission grant
+  codesign --force --deep --sign - "$APP" 2>/dev/null || true
+fi
 
 du -sh "$APP" | awk '{print "==> Built " $2 " (" $1 ")"}'
 
@@ -144,7 +183,8 @@ if [ "${1:-}" = "--install" ]; then
   rm -rf /Applications/FillerKiller.app /Applications/FillerCoach.app  # drop pre-rebrand app too
   ditto "$APP" /Applications/FillerKiller.app
   # clear any stale auto-denied mic decision so the prompt can appear
-  tccutil reset Microphone local.fillerkiller >/dev/null 2>&1 || true
+  tccutil reset Microphone "$BUNDLE_ID" >/dev/null 2>&1 || true
+  tccutil reset Microphone local.fillerkiller >/dev/null 2>&1 || true  # pre-signing bundle ID
   echo "==> Launching"
   open -a /Applications/FillerKiller.app
   echo "    Allow the Microphone prompt on first run, then right-click the"

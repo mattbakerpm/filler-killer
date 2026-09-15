@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build FillerKiller.app — a SELF-CONTAINED Dock app.
 #
-# The bundle carries its own Python venv, the Vosk model, coach.py, and its
+# The bundle carries its own Python runtime, the Vosk model, coach.py, and its
 # own config.json. Nothing is read from this project folder at runtime, so
 # macOS's Documents-folder privacy protection can't kill it when launched
 # from the Dock, and the app keeps working even if you move this project.
@@ -34,14 +34,22 @@ echo "==> Building $APP (self-contained)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RES/app"
 
-# --- embedded venv (symlinked interpreter: Apple's python3 can't self-copy;
-#     the symlink targets the system framework, NOT this project folder, so
-#     the app still never reads ~/Documents at launch) ---
-echo "==> Creating embedded venv"
-/usr/bin/python3 -m venv "$RES/venv"
-"$RES/venv/bin/python" -m pip install --quiet --upgrade pip
+# --- embedded Python: a full copy of the framework's Versions/3.x subtree.
+#     A venv can't ship: its pyvenv.cfg `home` and interpreter point at the
+#     Xcode/CLT install, which end users don't have. The framework layout is
+#     self-relocating — bin/python3 finds its dylib (@executable_path/../Python3)
+#     and stdlib relative to itself — so a copy inside the bundle is truly
+#     self-contained and signable. ---
+PYPREFIX=$(/usr/bin/python3 -c "import sys; print(sys.prefix)")
+echo "==> Embedding Python from $PYPREFIX"
+mkdir -p "$RES/python"
+ditto "$PYPREFIX" "$RES/python"
+rm -rf "$RES/python/lib/python3."*/test "$RES/python/lib/python3."*/idlelib 2>/dev/null || true
+find "$RES/python" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+PYBIN="$RES/python/bin/python3"
 echo "==> Installing packages into the app (vosk, sounddevice, pyobjc Cocoa+AVFoundation)"
-"$RES/venv/bin/python" -m pip install --quiet vosk sounddevice pyobjc-framework-Cocoa pyobjc-framework-AVFoundation
+"$PYBIN" -m pip install --quiet --upgrade pip
+"$PYBIN" -m pip install --quiet vosk sounddevice pyobjc-framework-Cocoa pyobjc-framework-AVFoundation
 
 # --- app code, config, model, brand assets (About window logo) ---
 cp coach.py "$RES/app/"
@@ -51,7 +59,7 @@ echo "==> Copying Vosk model (~40MB)"
 cp -R model "$RES/app/model"
 
 # --- icon: brand mark (assets/filler-killer-mark.svg) on a white tile ---
-"$RES/venv/bin/python" - <<'PY'
+"$PYBIN" - <<'PY'
 from Cocoa import (NSImage, NSMakeRect, NSColor, NSBezierPath,
                    NSMakeSize, NSBitmapImageRep, NSPNGFileType,
                    NSCompositingOperationSourceOver)
@@ -122,7 +130,7 @@ let res = exeURL.deletingLastPathComponent()          // MacOS/
     .appendingPathComponent("Resources")
 
 let proc = Process()
-proc.executableURL = res.appendingPathComponent("venv/bin/python")
+proc.executableURL = res.appendingPathComponent("python/bin/python3")
 proc.arguments = [res.appendingPathComponent("app/coach.py").path, "--dock"]
 
 signal(SIGTERM, SIG_IGN)
@@ -143,19 +151,17 @@ swiftc -O /tmp/fillerkiller_launcher.swift -o "$APP/Contents/MacOS/FillerKiller"
 
 if [ -n "$SIGN_ID" ]; then
   # Developer ID signing, inside-out: notarization requires every Mach-O in
-  # the bundle (pip wheels' .so/.dylib, the venv python if copied) to carry a
+  # the bundle (pip wheels' .so/.dylib, the embedded python) to carry a
   # hardened-runtime Developer ID signature before the outer bundle is signed.
-  # notarization forbids symlinks that resolve outside the bundle: replace the
-  # venv's python symlinks with real copies of the interpreter binary
-  for link in "$RES"/venv/bin/python*; do
-    if [ -L "$link" ]; then
-      target=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$link")
-      rm "$link" && cp "$target" "$link"
-    fi
-  done
+  # notarization forbids symlinks that resolve outside the bundle
+  BAD=$(find "$RES" -type l -print0 | while IFS= read -r -d '' l; do
+    tgt=$(readlink "$l")
+    if [ ! -e "$l" ] || [ "${tgt#/}" != "$tgt" ]; then echo "$l -> $tgt"; fi
+  done)
+  [ -z "$BAD" ] || { echo "external/broken symlinks in bundle:"; echo "$BAD"; exit 1; }
   echo "==> Signing embedded binaries with: $SIGN_ID"
-  # every Mach-O in the venv, whatever its extension (vosk ships libvosk.dyld)
-  find "$RES/venv" -type f -print0 |
+  # every Mach-O in the runtime, whatever its extension (vosk ships libvosk.dyld)
+  find "$RES/python" -type f -print0 |
     while IFS= read -r -d '' f; do
       file -b "$f" | grep -q Mach-O || continue
       codesign --force --options runtime --timestamp \

@@ -45,6 +45,9 @@ echo "==> Embedding Python from $PYPREFIX"
 mkdir -p "$RES/python"
 ditto "$PYPREFIX" "$RES/python"
 rm -rf "$RES/python/lib/python3."*/test "$RES/python/lib/python3."*/idlelib 2>/dev/null || true
+# drop Apple's framework seal — our edits invalidate it, and a stale seal makes
+# codesign/notarization read python/ as a broken bundle
+rm -rf "$RES/python/_CodeSignature"
 find "$RES/python" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
 PYBIN="$RES/python/bin/python3"
 echo "==> Installing packages into the app (vosk, sounddevice, pyobjc Cocoa+AVFoundation)"
@@ -161,12 +164,19 @@ if [ -n "$SIGN_ID" ]; then
   [ -z "$BAD" ] || { echo "external/broken symlinks in bundle:"; echo "$BAD"; exit 1; }
   echo "==> Signing embedded binaries with: $SIGN_ID"
   # every Mach-O in the runtime, whatever its extension (vosk ships libvosk.dyld)
-  find "$RES/python" -type f -print0 |
+  find "$RES/python" -type f ! -path "*/python/Python3" -print0 |
     while IFS= read -r -d '' f; do
       file -b "$f" | grep -q Mach-O || continue
       codesign --force --options runtime --timestamp \
         --entitlements entitlements.plist --sign "$SIGN_ID" "$f"
     done
+  # codesign reads python/ as a framework whose Python3 seal covers Resources/,
+  # so the nested Python.app bundle must be sealed first and Python3 after it
+  codesign --force --options runtime --timestamp \
+    --entitlements entitlements.plist --sign "$SIGN_ID" \
+    "$RES/python/Resources/Python.app"
+  codesign --force --options runtime --timestamp \
+    --entitlements entitlements.plist --sign "$SIGN_ID" "$RES/python/Python3"
   echo "==> Signing bundle"
   codesign --force --options runtime --timestamp \
     --entitlements entitlements.plist --sign "$SIGN_ID" "$APP"

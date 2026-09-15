@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-11 |
-| **Status** | In Progress — updated as work progresses |
+| **Status** | Complete |
 | **Project** | filler-killer |
 | **Backlog Card ID** | TBD |
 
@@ -59,8 +59,10 @@ embedded venv + mic capture anyway).
 
 | Turn / Date | What changed |
 |---|---|
-| | |
+| 2026-09-15 | Cert + notary creds set up (Team 8D255AMD3H). Three notarization rejections fixed in turn: (1) libvosk.dyld unsigned — sign all Mach-Os by `file` type, not extension; (2) venv unshippable — interpreter/pyvenv.cfg pointed at Xcode; replaced venv with full embedded Python3.framework Versions subtree (self-relocating); (3) stale Apple `_CodeSignature` + wrong order — Python.app sealed before python/Python3, framework seal dropped. Also: launcher compiled via fixed /tmp path came out broken (hung in dyld pre-main) — build temps now go through mktemp -d. v1.6.0 released on GitHub; tap switched from formula to cask. |
 
 ## Result
 
-**Status:** In progress — blocked on user creating Developer ID cert + notary credentials
+**Status:** Complete
+**Backlog card:** fc12, done
+**Notes:** v1.6.0 released signed+notarized+stapled; `brew install --cask mattbakerpm/tap/filler-killer` verified end-to-end (spctl accepted, staple valid, python child spawns). Remaining user step: first launch shows the standard one-time "downloaded from the internet" dialog (quarantine flag from the download), then the Microphone prompt for the new bundle ID.

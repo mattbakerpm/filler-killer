@@ -117,6 +117,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Filler Killer listens to your microphone locally to count filler words. Audio never leaves this Mac.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Filler Killer checks when your Mac is playing sound (like the other people on a call) so their voices aren't counted as your filler words. It only measures loudness; nothing is recorded or sent.</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
@@ -154,7 +156,19 @@ do {
 proc.waitUntilExit()
 exit(proc.terminationStatus)
 SWIFT
-swiftc -O $TMPD/fillerkiller_launcher.swift -o "$APP/Contents/MacOS/FillerKiller"
+# Universal, with an explicit minimum macOS: swiftc otherwise targets the
+# BUILD machine's OS and arch (v1.6.0 shipped a launcher needing macOS 27 on
+# arm64 only, so it wouldn't open anywhere else). The embedded Python needs 14.0.
+swift_universal() {  # src out minos
+  swiftc -O -target "arm64-apple-macos$3" "$1" -o "$TMPD/out-arm64"
+  swiftc -O -target "x86_64-apple-macos$3" "$1" -o "$TMPD/out-x86_64"
+  lipo -create "$TMPD/out-arm64" "$TMPD/out-x86_64" -output "$2"
+}
+swift_universal $TMPD/fillerkiller_launcher.swift "$APP/Contents/MacOS/FillerKiller" 14.0
+
+# --- speaker-gate helper (Core Audio process tap, macOS 14.2+; on 14.0-14.1
+#     it can't load and FK simply runs without the gate) ---
+swift_universal fk-systap.swift "$APP/Contents/MacOS/fk-systap" 14.2
 
 if [ -n "$SIGN_ID" ]; then
   # Developer ID signing, inside-out: notarization requires every Mach-O in
@@ -181,6 +195,8 @@ if [ -n "$SIGN_ID" ]; then
     "$RES/python/Resources/Python.app"
   codesign --force --options runtime --timestamp \
     --entitlements entitlements.plist --sign "$SIGN_ID" "$RES/python/Python3"
+  codesign --force --options runtime --timestamp \
+    --entitlements entitlements.plist --sign "$SIGN_ID" "$APP/Contents/MacOS/fk-systap"
   echo "==> Signing bundle"
   codesign --force --options runtime --timestamp \
     --entitlements entitlements.plist --sign "$SIGN_ID" "$APP"

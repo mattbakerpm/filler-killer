@@ -18,8 +18,9 @@ finally stop saying them.
 - **App-agnostic** — works over any call app (Zoom, Meet, Teams, phone,
   Granola...) because it listens to your microphone, not to any app's
   transcript.
-- **Counts only you** — macOS echo cancellation subtracts the speaker audio,
-  so the other side of a speakerphone call is ignored. No headphones required.
+- **Counts only you** — words heard while your Mac is playing the other side
+  of the call are ignored, so no headphones are required — and your mic is
+  never altered, so the call hears you normally.
 
 <p align="center">
 <img width="326" height="443" alt="Filler Killer Screenshot" src="https://github.com/user-attachments/assets/989fb71d-9d06-4396-a24b-1bee9f8c821d" />
@@ -38,12 +39,18 @@ finally stop saying them.
     (skipped when the pace warning is off).
   Appears after ~30 spoken words. Green ≥ 85, amber ≥ 65, red below.
 - **Rate per minute**, color-coded: green < 4/min, amber 4–8, red ≥ 8.
-- **Pace (wpm)** — your speaking speed over the last 30s of your own talking
-  (other people's silence doesn't dilute it). Conversational English is
-  ~140–170 wpm; fast talkers slip more fillers because the mouth outruns the
-  plan. Modes: **Off**, **Relaxed** (warn over 220), **Strict** (warn over
-  180). Crossing the limit shows "▲ SLOW DOWN · 300 wpm", flashes the
-  counter red, and counts a *fast* episode in the stats line.
+- **Pace (wpm), live + call average** — "*172 wpm now*" is your speed over
+  your last 10s of talking, updated while you speak. It drops to 0 ~3s
+  after you stop, and a pause over 2s starts a fresh reading (shown as "…"
+  for the first couple of seconds back), so it reflects how you're talking
+  *now*, not the stretch before the pause. "*avg 151 wpm*" is your average for the whole call, so you can
+  watch it come down after you slow down. Normal pauses (under 2s) count as
+  talking time, the way a listener hears your pace; other people's turns
+  don't. Conversational English is ~140–170 wpm; fast talkers slip more
+  fillers because the mouth outruns the plan. Modes: **Off**, **Relaxed**
+  (warn over 190), **Strict** (warn over 170). Crossing the limit shows
+  "▲ SLOW DOWN · 205 wpm", flashes the counter red, and counts a *fast*
+  episode in the stats line; the warning clears as soon as you slow down.
 - **Timeline graph** — fillers per 30s interval, growing left → right and
   compressing so the whole call stays visible. At the end of a call you can see
   at a glance whether you tightened up.
@@ -82,7 +89,7 @@ Settings live in `~/Library/Application Support/FillerKiller/config.json`
 
 ### From source
 
-Requires macOS + [Homebrew](https://brew.sh).
+Requires macOS 14 (Sonoma) or later — Apple silicon or Intel — + [Homebrew](https://brew.sh).
 
 ```bash
 git clone https://github.com/mattbakerpm/filler-killer.git
@@ -140,28 +147,34 @@ the live red flash.
 
 ## Excluding other people's voices (no headphones needed)
 
-Filler Killer captures the mic through macOS's **voice-processing engine** —
-the same echo cancellation FaceTime and Zoom use. Whatever your Mac plays
-through its speakers (i.e. everyone else on the call) is subtracted from the
-mic signal *by the OS* before Filler Killer ever hears it, so on a
-speakerphone call only **your** speech is counted.
+Filler Killer captures your mic plainly and runs a **speaker gate** next to
+it: a tiny helper (`fk-systap`, a Core Audio process tap) measures how loud
+your Mac's own playback is, and any words the mic picks up *while the Mac is
+playing sound* (i.e. everyone else on the call, echoing off your speakers)
+are ignored — not counted as fillers, not counted toward your talk time or
+pace. Audio from the tap is only measured, never stored.
 
-Verified empirically: speech played through the built-in speakers is fully
-transcribed by plain capture but yields **zero counted fillers** under voice
-processing, at normal volume, mic and speakers inches apart.
+Why not echo cancellation? Up to v1.6, Filler Killer used macOS's
+voice-processing engine. It removed speaker audio well, but while it ran it
+also **muted the mic for other apps** — on a Teams/Meet call in the browser,
+the other side could barely hear you (measured: about -60 dB). The gate
+never touches the mic.
 
 Notes:
-- On by default. Toggle it from the **menu bar → Echo Cancellation** or the
-  Settings checkbox (`echo_cancel` in `config.json`).
-- **Other audio gets a bit quieter while it runs.** That's macOS, not a bug:
-  the system ducks other audio to give the echo canceller headroom — FaceTime
-  does the same. Filler Killer requests the minimum ducking level, but if it
-  bothers you (e.g. on headphone days, when you don't need cancellation),
-  just toggle Echo Cancellation off for full audio quality.
-- Active when using the system-default mic. Pinning a specific `mic_device`
-  falls back to plain capture — prefer switching the *system* input instead.
-- It only cancels audio *this Mac* plays. Someone talking in the room with you
-  is still heard (headphones can't fix that either).
+- On by default. Toggle it from the **menu bar → Ignore Speaker Audio** or
+  the Settings checkbox (`echo_cancel` in `config.json`).
+- macOS asks once for **System Audio Recording** permission (System Settings
+  → Privacy & Security → Screen & System Audio Recording). If it's denied,
+  the gate hears nothing and other voices get counted — use headphones or
+  grant it there.
+- Tradeoff: fillers you say *while talking over someone* are skipped too.
+- Works with any mic, including a pinned `mic_device`. Needs macOS 14.2+;
+  on older macOS the gate is off (use headphones).
+- It only knows about audio *this Mac* plays. Someone talking in the room
+  with you is still heard (headphones can't fix that either).
+- The old voice-processing mode is still available for apps that use it
+  themselves (FaceTime): set `"echo_method": "voice_processing"` in
+  `config.json`. Don't use it for browser calls.
 
 ## Configuration
 
@@ -171,10 +184,11 @@ Everything lives in `config.json` (editable in-app via ⚙, or by hand):
 |-----|---------|
 | `fillers` | Word fillers/phrases for the word pass (multi-word supported). |
 | `acoustic_fillers` | Sounds for the acoustic pass (default `um`, `uh`). Must be single in-vocabulary words; adding more raises false-positive risk. |
-| `echo_cancel` | macOS voice-processing echo cancellation — ignore what the Mac's speakers play (default `true`). |
-| `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). Pinning a device disables `echo_cancel`. |
+| `echo_cancel` | Ignore words heard while the Mac plays audio — the speaker gate (default `true`). |
+| `echo_method` | `speaker_gate` (default) or legacy `voice_processing` (mutes your mic for other apps — FaceTime only). |
+| `mic_device` | `null` = system default, or a device index (`./run.sh --list-devices`). |
 | `monologue` | Airtime guard: `mode` `off` / `short` / `medium`, plus the two thresholds in seconds. |
-| `pace` | Pace guard: `mode` `off` / `relaxed` / `strict`, `relaxed_wpm` (220), `strict_wpm` (180), `window_seconds` (30). |
+| `pace` | Pace guard: `mode` `off` / `relaxed` / `strict`, `relaxed_wpm` (190), `strict_wpm` (170), `window_seconds` (10, the live window). |
 | `session.auto_end_minutes` | Silence minutes before a session auto-ends and saves (default 3, `0` disables). |
 | `graph.bucket_seconds` | Timeline graph interval (default 30). |
 | `window`, `alert` | Position, opacity, flash, rate window. |

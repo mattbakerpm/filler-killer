@@ -19,7 +19,7 @@
     "uh"
   ],
   "mic_device": null,
-  "_comment_echo_cancel": "macOS voice-processing echo cancellation: what your Mac plays through its speakers (other people on the call) is subtracted before counting, so you can skip headphones. Only active with the default mic (mic_device null). Set false to use plain capture.",
+  "_comment_echo_cancel": "Speaker gate: words heard while your Mac is playing audio (other people on the call) are not counted, so you can skip headphones. Your mic is never altered. Needs System Audio Recording permission (macOS 14.2+). echo_method \"voice_processing\" = legacy macOS echo cancellation, which mutes your mic for other apps (browser calls) — avoid.",
   "echo_cancel": true,
   "_comment_mic": "null = system default input. Pick a device in the in-app settings, or run `./run.sh --list-devices`.",
   "monologue": {
@@ -29,11 +29,11 @@
     "medium_seconds": 90
   },
   "pace": {
-    "_comment": "Pace guard: SLOW DOWN warning when your trailing words-per-minute (over your own talking time, window_seconds) exceeds the limit. mode: off | relaxed | strict. Conversational English is ~140-170 wpm.",
+    "_comment": "Pace guard: live pace = your last window_seconds of talking (normal pauses under 2s count, other people's turns don't); SLOW DOWN when it exceeds the limit, clears as soon as you slow down or stop. The panel also shows your call average. mode: off | relaxed | strict. Conversational English is ~140-170 wpm.",
     "mode": "relaxed",
-    "relaxed_wpm": 220,
-    "strict_wpm": 180,
-    "window_seconds": 30
+    "relaxed_wpm": 190,
+    "strict_wpm": 170,
+    "window_seconds": 10
   },
   "session": {
     "_comment": "Sessions auto-end (save to history + start fresh) after this many minutes of silence. 0 disables auto-end.",

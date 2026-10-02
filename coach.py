@@ -22,6 +22,7 @@ import os
 import queue
 import re
 import statistics
+import subprocess
 import threading
 import time
 
@@ -149,34 +150,83 @@ AC_MAX_DUR = 2.0     # seconds — reject long [unk]-like stretches
 AC_MIN_CONF = 0.7
 
 
+def kept_runs(wt, playback):
+    """Split Vosk word results into runs of consecutive words that did NOT
+    overlap speaker playback. Runs are matched separately so dropping the
+    words in between can't glue a false phrase ("you" ... "know")."""
+    runs, cur = [], []
+    for w in wt:
+        if playback(w.get("start", 0), w.get("end", 0)):
+            if cur:
+                runs.append(cur)
+                cur = []
+        else:
+            cur.append(w)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
 def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False,
-                  ac_min_dur=AC_MIN_DUR, ac_min_conf=AC_MIN_CONF):
-    """Feed one audio block through both recognizers; emit events to `out`."""
+                  ac_min_dur=AC_MIN_DUR, ac_min_conf=AC_MIN_CONF,
+                  playback=None, block_busy=False, clock=None):
+    """Feed one audio block through both recognizers; emit events to `out`.
+
+    playback(start, end) -> True when the Mac's speakers were playing during
+    that stretch of the stream (speaker gate); those words are someone else's
+    voice (or ours talking over them) and are ignored. block_busy = playback
+    during this block, for live partial/airtime events. clock(stream_seconds)
+    -> time.monotonic(), so word timings feed the live pace readout.
+
+    rec_word must have SetWords(True) and SetPartialWords(True)."""
+    clock = clock or (lambda t: t)
+
+    def spans(words):
+        return [(clock(w.get("start", 0)), clock(w.get("end", 0))) for w in words]
+
+    def heard(w):
+        return not (playback and playback(w.get("start", 0), w.get("end", 0)))
+
     # word pass
     if rec_word.AcceptWaveform(data):
         res = json.loads(rec_word.Result())
-        text = res.get("text", "")
-        if text:
-            toks = normalize(text)
-            # utterance duration from Vosk's own word timestamps (first word
-            # start -> last word end) so pace doesn't depend on wall-clock
-            # turn tracking, which only ticks at utterance boundaries
-            wt = res.get("result", [])
-            spoken = (wt[-1].get("end", 0) - wt[0].get("start", 0)) if wt else 0.0
-            if echo:
-                pace = f" → {len(toks) * 60.0 / spoken:.0f} wpm" if spoken > 0 else ""
-                print(f"heard: {text}  [{len(toks)} words / {spoken:.1f}s{pace}]", flush=True)
-            out.put(("speech",))
-            out.put(("words", len(toks), max(0.0, spoken)))
-            counts = count_fillers(toks, matchers)
-            # um/uh style fillers are counted by the acoustic pass; drop them
-            # here in case a model ever does emit them (avoids double count)
-            counts = {k: v for k, v in counts.items() if k not in ac_set}
-            if counts:
-                out.put(("final", counts))
+        wt = res.get("result", [])
+        if res.get("text", ""):
+            runs = kept_runs(wt, playback) if playback else [wt]
+            if echo and playback:
+                gone = [w.get("word") for w in wt if not heard(w)]
+                if gone:
+                    print(f"ignored (speakers playing): {' '.join(gone)}", flush=True)
+            runs = [r for r in runs if r]
+            if runs:
+                toks, kept, counts = [], [], {}
+                for r in runs:
+                    rt = normalize(" ".join(w.get("word", "") for w in r))
+                    toks += rt
+                    kept += r
+                    for k, v in count_fillers(rt, matchers).items():
+                        counts[k] = counts.get(k, 0) + v
+                if echo:
+                    sp = talk_span([(w.get("start", 0), w.get("end", 0)) for w in kept])
+                    pace = f" → {len(toks) * 60.0 / sp:.0f} wpm" if sp > 0 else ""
+                    print(f"heard: {' '.join(toks)}  [{len(toks)} words / {sp:.1f}s{pace}]",
+                          flush=True)
+                out.put(("speech",))
+                out.put(("words", len(toks), spans(kept)))
+                # um/uh style fillers are counted by the acoustic pass; drop them
+                # here in case a model ever does emit them (avoids double count)
+                counts = {k: v for k, v in counts.items() if k not in ac_set}
+                if counts:
+                    out.put(("final", counts))
+        # this utterance's partial words are superseded (or were all gated)
+        out.put(("live_words", []))
     else:
-        ptext = json.loads(rec_word.PartialResult()).get("partial", "")
-        if ptext:
+        pres = json.loads(rec_word.PartialResult())
+        ptext = pres.get("partial", "")
+        # live pace: words of the utterance in progress (lag ~1.5 s behind)
+        out.put(("live_words", spans([w for w in pres.get("partial_result", [])
+                                      if heard(w)])))
+        if ptext and not block_busy:
             # any live partial text = the user is currently speaking
             out.put(("speech",))
             hits = set(count_fillers(normalize(ptext), matchers)) - ac_set
@@ -190,6 +240,8 @@ def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False,
             word = w.get("word")
             dur = w.get("end", 0) - w.get("start", 0)
             conf = w.get("conf", 0)
+            if playback and playback(w.get("start", 0), w.get("end", 0)):
+                continue
             if word in ac_set and ac_min_dur <= dur <= AC_MAX_DUR and conf >= ac_min_conf:
                 if echo:
                     print(f"heard (acoustic): {word} ({dur:.2f}s conf {conf:.2f})", flush=True)
@@ -199,11 +251,129 @@ def process_block(data, rec_word, rec_ac, matchers, ac_set, out, echo=False,
 
 
 # --------------------------------------------------------------------------
+# Speaker gate
+#
+# macOS voice processing (the old echo canceller) mutes the mic for every
+# OTHER app capturing it plainly — a Teams/Meet call in Chrome went near
+# silent (-60 dB) while it ran. So the mic is always captured plainly, and
+# remote voices are handled by watching the Mac's own playback instead:
+# fk-systap (Swift, Core Audio process tap) reports playback loudness every
+# ~50 ms, and words the mic heard while the speakers were playing are
+# ignored. Cost: your own fillers while talking OVER someone are missed too.
+# --------------------------------------------------------------------------
+GATE_ON_DBFS = -50.0    # playback louder than this counts as audible
+GATE_PAD_BEFORE = 0.15  # s — tap/mic timing slack
+GATE_PAD_AFTER = 0.45   # s — room echo tail + slack after playback stops
+GATE_HISTORY = 120.0    # s of playback intervals kept
+
+
+def find_systap():
+    """Path to the fk-systap helper: inside the .app (Contents/MacOS), or
+    next to coach.py when running from source (run.sh builds it)."""
+    for p in (os.environ.get("FILLER_KILLER_SYSTAP"),
+              os.path.join(HERE, "..", "..", "MacOS", "fk-systap"),
+              os.path.join(HERE, "fk-systap")):
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            return os.path.abspath(p)
+    return None
+
+
+class SpeakerGate(threading.Thread):
+    """Runs fk-systap and remembers when the Mac's speakers were playing
+    (time.monotonic intervals). Restarts the helper when it exits because
+    the output device changed."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self._lock = threading.Lock()
+        self._iv = []            # [start, end] monotonic, oldest first
+        self._stop = threading.Event()
+        self._proc = None
+        self.status = "starting"
+        self.max_dbfs = -120.0
+
+    def stop(self):
+        self._stop.set()
+        p = self._proc
+        if p is not None:
+            try:
+                p.stdin.close()   # helper exits on stdin EOF and cleans up
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+    def run(self):
+        path = find_systap()
+        if not path:
+            self.status = "unavailable: helper not found"
+            return
+        fails = 0
+        while not self._stop.is_set():
+            try:
+                self._proc = subprocess.Popen(
+                    [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, bufsize=1)
+            except Exception as e:
+                self.status = f"unavailable: {e}"
+                return
+            for line in self._proc.stdout:
+                line = line.strip()
+                if line.startswith("ready"):
+                    self.status = "active"
+                    fails = 0
+                    continue
+                try:
+                    db = float(line)
+                except ValueError:
+                    continue
+                self._level(db, time.monotonic())
+            code = self._proc.wait()
+            if self._stop.is_set():
+                break
+            if code == 2:   # no process-tap support (macOS < 14.2)
+                self.status = "unavailable: needs macOS 14.2+"
+                return
+            if code != 3:   # 3 = output device switched: restart right away
+                fails += 1
+                err = (self._proc.stderr.read() or "").strip()
+                self.status = f"restarting ({err[-80:] or code})"
+                if fails >= 5:
+                    self.status = f"unavailable: {err[-80:] or code}"
+                    return
+                self._stop.wait(min(30, 2 ** fails))
+
+    def _level(self, db, t):
+        self.max_dbfs = max(self.max_dbfs, db)
+        if db < GATE_ON_DBFS:
+            return
+        with self._lock:
+            if self._iv and t - self._iv[-1][1] <= 0.15:
+                self._iv[-1][1] = t
+            else:
+                self._iv.append([t - 0.05, t])
+            while self._iv and self._iv[0][1] < t - GATE_HISTORY:
+                self._iv.pop(0)
+
+    def busy(self, t0, t1):
+        """True if playback overlapped [t0, t1] (monotonic seconds)."""
+        with self._lock:
+            for s, e in reversed(self._iv):
+                if e + GATE_PAD_AFTER < t0:
+                    return False
+                if s - GATE_PAD_BEFORE <= t1:
+                    return True
+        return False
+
+
+# --------------------------------------------------------------------------
 # Audio + recognition thread (pushes events to a queue)
 # --------------------------------------------------------------------------
 class Listener(threading.Thread):
     def __init__(self, matchers, mic_device, out_queue, acoustic_fillers=None,
-                 echo=False, echo_cancel=True):
+                 echo=False, echo_cancel=True, echo_method="speaker_gate"):
         super().__init__(daemon=True)
         self.matchers = matchers
         self.mic_device = mic_device
@@ -211,11 +381,48 @@ class Listener(threading.Thread):
         self.acoustic = list(acoustic_fillers or ["um", "uh"])
         self.echo = echo
         self.echo_cancel = echo_cancel
+        self.echo_method = echo_method
         self.backend = "portaudio"
+        self.gate = None
+        self._clock = []         # (stream samples through block end, arrival monotonic)
+        self._samples = 0
         self._stop = threading.Event()
 
     def stop(self):
         self._stop.set()
+
+    def _stamp(self, nbytes, arrived):
+        """Record when the block ending at this stream position was captured,
+        so Vosk's stream-relative word times map back to the wall clock."""
+        self._samples += nbytes // 2
+        self._clock.append((self._samples, arrived))
+        if len(self._clock) > 600:   # ~5 min of 0.5 s blocks
+            del self._clock[:100]
+
+    def _mono(self, sec):
+        """Stream seconds (Vosk timestamps) -> time.monotonic()."""
+        s = sec * SAMPLE_RATE
+        if not self._clock:
+            return time.monotonic()
+        hit = None   # oldest block whose end is at/after s, searching back from newest
+        for end, arrived in reversed(self._clock):
+            if end < s:
+                break
+            hit = (end, arrived)
+        if hit is None:   # past the newest block
+            end, arrived = self._clock[-1]
+            return arrived + (s - end) / SAMPLE_RATE
+        end, arrived = hit
+        return arrived - (end - s) / SAMPLE_RATE
+
+    def _playback(self, start, end):
+        return self.gate.busy(self._mono(start), self._mono(end))
+
+    def _gate_args(self, nbytes, arrived):
+        if self.gate is None or self.gate.status != "active":
+            return {}
+        return {"playback": self._playback,
+                "block_busy": self.gate.busy(arrived - nbytes / 2 / SAMPLE_RATE, arrived)}
 
     def run(self):
         try:
@@ -233,6 +440,7 @@ class Listener(threading.Thread):
             model = Model(MODEL_DIR)
             rec_word = KaldiRecognizer(model, SAMPLE_RATE)
             rec_word.SetWords(True)     # word timestamps feed the pace (wpm) readout
+            rec_word.SetPartialWords(True)  # ...live, while you're still talking
             rec_ac = KaldiRecognizer(model, SAMPLE_RATE,
                                      json.dumps(self.acoustic + ["[unk]"]))
             rec_ac.SetWords(True)
@@ -240,16 +448,24 @@ class Listener(threading.Thread):
             self.out.put(("error", f"Failed to load model: {e}"))
             return
 
-        # Prefer macOS voice-processing capture (echo cancellation): the OS
-        # subtracts what the Mac is playing through its speakers, so remote
-        # voices on a speakerphone call are NOT counted. Verified empirically:
-        # TTS through the speakers is fully recognized by plain capture but
-        # suppressed to nothing under voice processing. Falls back to
-        # PortAudio if unavailable, disabled, or a specific mic is pinned.
-        if self.echo_cancel and self.mic_device is None:
-            if self._run_engine(rec_word, rec_ac):
-                return
-        self._run_portaudio(sd, rec_word, rec_ac)
+        # Default: plain capture + speaker gate (see SpeakerGate). Legacy
+        # opt-in (echo_method "voice_processing"): macOS voice processing
+        # subtracts speaker audio properly, but mutes the mic for other apps
+        # (browser calls) while it runs — only sensible when the call app
+        # itself uses voice processing (FaceTime, some desktop apps).
+        if self.echo_cancel:
+            if self.echo_method == "voice_processing":
+                if self.mic_device is None and self._run_engine(rec_word, rec_ac):
+                    return
+            else:
+                self.gate = SpeakerGate()
+                self.gate.start()
+                self.backend = "portaudio + speaker gate"
+        try:
+            self._run_portaudio(sd, rec_word, rec_ac)
+        finally:
+            if self.gate is not None:
+                self.gate.stop()
 
     def _run_engine(self, rec_word, rec_ac):
         """AVAudioEngine capture with voice processing. True = ran (or died
@@ -285,7 +501,8 @@ class Listener(threading.Thread):
             def tap(buf, when):
                 try:
                     n = int(buf.frameLength())
-                    aq.put(bytes(buf.floatChannelData()[0].as_buffer(4 * n)))
+                    aq.put((bytes(buf.floatChannelData()[0].as_buffer(4 * n)),
+                            time.monotonic()))
                 except Exception:
                     pass
 
@@ -310,7 +527,7 @@ class Listener(threading.Thread):
         try:
             while not self._stop.is_set():
                 try:
-                    raw = aq.get(timeout=0.25)
+                    raw, arrived = aq.get(timeout=0.25)
                 except queue.Empty:
                     continue
                 floats = array.array("f", raw)
@@ -319,6 +536,7 @@ class Listener(threading.Thread):
                     for x in floats))
                 data, state = audioop.ratecv(ints.tobytes(), 2, 1, sr,
                                              SAMPLE_RATE, state)
+                self._stamp(len(data), arrived)
                 rms = audioop.rms(data, 2)
                 max_rms = max(max_rms, rms)
                 self.out.put(("level", rms))
@@ -327,7 +545,8 @@ class Listener(threading.Thread):
                     self._write_diagnostic(None, max_rms)
                 process_block(data, rec_word, rec_ac, self.matchers,
                               ac_set, self.out, echo=self.echo,
-                              ac_min_dur=self._ac_dur, ac_min_conf=self._ac_conf)
+                              ac_min_dur=self._ac_dur, ac_min_conf=self._ac_conf,
+                              clock=self._mono)
         except Exception as e:
             self.out.put(("error", f"Audio error: {e}"))
         finally:
@@ -341,7 +560,8 @@ class Listener(threading.Thread):
         audio_q = queue.Queue()
 
         def audio_cb(indata, frames, time_info, status):
-            audio_q.put(bytes(indata))
+            # stamp on arrival: recognition can lag, the capture time can't
+            audio_q.put((bytes(indata), time.monotonic()))
 
         self.out.put(("status", "listening"))
         try:
@@ -350,23 +570,28 @@ class Listener(threading.Thread):
                                    channels=1, callback=audio_cb):
                 ac_set = set(self.acoustic)
                 started = time.time()
-                diag_done = False
+                diag_at = 0.0
                 max_rms = 0
                 while not self._stop.is_set():
                     try:
-                        data = audio_q.get(timeout=0.25)
+                        data, arrived = audio_q.get(timeout=0.25)
                     except queue.Empty:
                         continue
+                    self._stamp(len(data), arrived)
                     # level ping lets the UI show the mic is actually hearing
                     # something (mic permission problems produce pure silence)
                     rms = audioop.rms(data, 2)
                     max_rms = max(max_rms, rms)
                     self.out.put(("level", rms))
-                    if not diag_done and time.time() - started > 5:
-                        diag_done = True
+                    # first at 5 s, then every minute so speaker-gate state
+                    # (permission, levels) reflects a real call
+                    if time.time() - started > 5 and time.time() - diag_at > 60:
+                        diag_at = time.time()
                         self._write_diagnostic(sd, max_rms)
                     process_block(data, rec_word, rec_ac, self.matchers,
-                                  ac_set, self.out, echo=self.echo)
+                                  ac_set, self.out, echo=self.echo,
+                                  clock=self._mono,
+                                  **self._gate_args(len(data), arrived))
         except Exception as e:
             self.out.put(("error", f"Audio error: {e}"))
             try:
@@ -378,7 +603,12 @@ class Listener(threading.Thread):
         """Drop mic state into AppSupport for troubleshooting silent-mic issues."""
         info = {"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "backend": self.backend,
-                "max_rms_first_5s": max_rms, "error": error}
+                "max_rms": max_rms, "error": error}
+        if self.gate is not None:
+            # max stays -120 on a call with speaker audio = System Audio
+            # Recording permission denied (the tap then delivers silence)
+            info["speaker_gate"] = self.gate.status
+            info["speaker_gate_max_dbfs"] = self.gate.max_dbfs
         try:
             import AVFoundation
             info["tcc_status"] = int(
@@ -436,6 +666,14 @@ def airtime_limit(cfg):
 # Pace (words-per-minute) tracking
 # --------------------------------------------------------------------------
 PACE_MIN_SPAN = 4.0   # seconds of timed speech before a wpm reading is trusted
+PACE_PAUSE_MAX = 2.0  # s — pauses up to this count as talking time (phrase
+                      # breaks); longer gaps are someone else's turn or silence
+LIVE_IDLE = 3.0       # s after your last word: live pace goes idle. Partial
+                      # words trail the audio by up to ~2 s, so less would
+                      # flicker mid-sentence.
+CALL_MIN_SPAN = 15.0  # s of talking before the call average is shown
+LIVE_MIN_WORDS = 6    # words in the window before a live reading is shown
+LIVE_MIN_SPAN = 3.0   # s of talking in the window before a live reading
 
 
 def pace_limit(cfg):
@@ -443,25 +681,49 @@ def pace_limit(cfg):
     pace = cfg.get("pace", {})
     mode = pace.get("mode", "relaxed")   # absent (pre-1.5 config) = relaxed
     if mode == "strict":
-        return float(pace.get("strict_wpm", 180))
+        return float(pace.get("strict_wpm", 170))
     if mode == "relaxed":
-        return float(pace.get("relaxed_wpm", 220))
+        return float(pace.get("relaxed_wpm", 190))
     return None
 
 
-def trailing_wpm(word_times, now, window):
-    """Words per minute over utterances that finished in the trailing `window`.
-    Each entry is (finished_at, n_words, spoken_seconds) where spoken_seconds
-    comes from the recognizer's word timestamps, so pauses between utterances
-    and other people's talking never dilute or inflate the reading."""
-    n = dur = 0.0
-    for t, c, d in word_times:
-        if t >= now - window:
-            n += c
-            dur += d
-    if n == 0 or dur < PACE_MIN_SPAN:
-        return 0.0
-    return n * 60.0 / dur
+def talk_span(words):
+    """Talking time covered by (start, end) word timings, sorted by start:
+    the words themselves plus the pauses between them up to PACE_PAUSE_MAX.
+    Speaking rate the way a listener hears it — measuring words only (or
+    each utterance separately) drops natural phrase pauses and reads ~20%
+    fast."""
+    span, prev_end = 0.0, None
+    for s, e in words:
+        span += max(0.0, e - s)
+        if prev_end is not None and 0 < s - prev_end <= PACE_PAUSE_MAX:
+            span += s - prev_end
+        prev_end = e if prev_end is None else max(prev_end, e)
+    return span
+
+
+def live_wpm(words, window):
+    """Pace over your last `window` seconds of words (words = (start, end)
+    monotonic, oldest first). None if too little speech yet. The window ends
+    at your LAST word, not at `now`: anchored to the clock, it slides past
+    your older words after you stop and the reading spikes on whatever
+    phrase is left (157 -> 223 wpm in testing) — a false SLOW DOWN.
+    A pause longer than PACE_PAUSE_MAX starts a fresh reading: after you
+    stop and restart, "now" reflects only how you're talking now."""
+    if not words:
+        return None
+    last = max(e for _, e in words[-8:])
+    recent = [w for w in words if w[1] >= last - window]
+    start, prev_end = 0, None
+    for i, (s, e) in enumerate(recent):
+        if prev_end is not None and s - prev_end > PACE_PAUSE_MAX:
+            start = i
+        prev_end = e if prev_end is None else max(prev_end, e)
+    recent = recent[start:]
+    span = talk_span(recent)
+    if len(recent) < LIVE_MIN_WORDS or span < LIVE_MIN_SPAN:
+        return None
+    return len(recent) * 60.0 / span
 
 
 def fmt_mmss(seconds):
@@ -472,7 +734,7 @@ def fmt_mmss(seconds):
 # --------------------------------------------------------------------------
 # App identity + sessions
 # --------------------------------------------------------------------------
-__version__ = "1.5.1"
+__version__ = "1.7.0"
 GITHUB_URL = "https://github.com/mattbakerpm/filler-killer"
 
 ABOUT_TEXT = (
@@ -658,11 +920,9 @@ def run_overlay(config, echo=False, dock=False):
             self.filler_times = []      # all timestamps, for burstiness
             self.turns = []             # completed talking-turn durations
             self.long_turns = 0
-            self.word_times = []        # (timestamp, n words) for trailing wpm
-            self.spoken_seconds = 0.0   # total timed speech (from word timestamps)
             self.fast_episodes = 0      # times pace crossed the limit
             self.fast_flagged = False
-            self.last_wpm = 0.0
+            self._reset_pace()
             self.run_flagged = False
             self.paused = False
             self.expanded = False
@@ -771,7 +1031,8 @@ def run_overlay(config, echo=False, dock=False):
                                      self.q,
                                      acoustic_fillers=self.cfg.get("acoustic_fillers"),
                                      echo=echo,
-                                     echo_cancel=self.cfg.get("echo_cancel", True))
+                                     echo_cancel=self.cfg.get("echo_cancel", True),
+                                     echo_method=self.cfg.get("echo_method", "speaker_gate"))
             self.listener.start()
 
         # ---- main window ----
@@ -788,7 +1049,7 @@ def run_overlay(config, echo=False, dock=False):
                 top = None  # resolved after we know screen height
 
             rows = self.sorted_counts() if self.expanded else []
-            H = (10 + 26 + 2 + 54 + 14 + 6 + 16 + 16 + 6 +
+            H = (10 + 26 + 2 + 54 + 14 + 6 + 16 + 2 + 16 + 16 + 6 +
                  GRAPH_H + 6 + 18 + len(rows) * ROW_H + 8 + 26 + 12)
 
             style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
@@ -859,15 +1120,22 @@ def run_overlay(config, echo=False, dock=False):
             y -= 6 + 16
             self.rate_lbl = label(view, PAD, y, 92, 16, 12, OK, mono=True, text="0.0 / min")
             self.rate_lbl.setAccessibilityLabel_("filler rate per minute")
-            self.wpm_lbl = label(view, PAD + 96, y, 84, 16, 12, DIM, mono=True,
-                                 align_right=True, text="— wpm")
-            self.wpm_lbl.setAccessibilityLabel_("speaking pace, words per minute")
-            self.wpm_lbl.setToolTip_("Speaking pace over the last "
-                                     f"{int(self.cfg.get('pace', {}).get('window_seconds', 30))}s "
-                                     "of your own talking")
             self.timer_lbl = label(view, W - PAD - 58, y, 58, 16, 12, DIM, mono=True,
                                    align_right=True, text="00:00")
             self.timer_lbl.setAccessibilityLabel_("session length")
+            # pace: live (left) + call average (right)
+            y -= 2 + 16
+            self.wpm_lbl = label(view, PAD, y, 140, 16, 12, DIM, mono=True, text="0 wpm now")
+            self.wpm_lbl.setAccessibilityLabel_("speaking pace right now, words per minute")
+            self.wpm_lbl.setToolTip_(
+                "Your pace over the last "
+                f"{int(self.cfg.get('pace', {}).get('window_seconds', 10))}s of your own "
+                "talking. Blank a few seconds after you stop.")
+            self.avg_lbl = label(view, W - PAD - 120, y, 120, 16, 12, DIM, mono=True,
+                                 align_right=True, text="avg —")
+            self.avg_lbl.setAccessibilityLabel_("average speaking pace this call")
+            self.avg_lbl.setToolTip_("Your average pace this call (your talking time only)")
+            self._show_pace()
             # airtime stats / warning line
             y -= 16
             self.air_lbl = label(view, PAD, y, W - 2 * PAD, 16, 11, DIM, mono=True, text="")
@@ -980,8 +1248,9 @@ def run_overlay(config, echo=False, dock=False):
                         self._apply(evt[1])
                     elif kind == "words":
                         self.words_total += evt[1]
-                        self.word_times.append((now, evt[1], evt[2]))
-                        self.spoken_seconds += evt[2]
+                        self._add_pace_words(evt[2])
+                    elif kind == "live_words":
+                        self.pace_partial = evt[1]
                     elif kind == "partial":
                         if evt[1] and self.cfg.get("alert", {}).get("flash_on_filler", True):
                             self._set_flash(now, 0.3)
@@ -1050,33 +1319,22 @@ def run_overlay(config, echo=False, dock=False):
                        and now - self.last_speech <= AIRTIME_GAP)
             if not talking and self.speech_start is not None:
                 self._end_turn()
-            # pace: trailing words-per-minute over own talking time
+            # pace: live (your last few seconds of words) + call average
             pace_cfg = self.cfg.get("pace", {})
-            pw = float(pace_cfg.get("window_seconds", 30))
-            self.word_times = [e for e in self.word_times if e[0] >= now - pw]
             wlimit = pace_limit(self.cfg)
-            stat_wlimit = wlimit or float(pace_cfg.get("relaxed_wpm", 220))
-            wpm = 0.0 if self.paused else trailing_wpm(self.word_times, now, pw)
-            if wpm == 0.0 and talking:
-                wpm = self.last_wpm     # mid-sentence: hold the last reading
-            self.last_wpm = wpm
-            if wpm > 0:
-                self.wpm_lbl.setStringValue_(f"{int(round(wpm))} wpm")
-                self.wpm_lbl.setTextColor_(
-                    ACCENT if wpm >= stat_wlimit else
-                    AMBER if wpm >= 0.85 * stat_wlimit else OK)
-            else:
-                self.wpm_lbl.setStringValue_("— wpm")
-                self.wpm_lbl.setTextColor_(DIM)
-            too_fast = wpm >= stat_wlimit
+            stat_wlimit = wlimit or float(pace_cfg.get("relaxed_wpm", 190))
+            wpm = 0.0 if self.paused else self._live_pace()
+            self.live_pace = wpm
+            self._show_pace(stat_wlimit)
+            too_fast = wpm is not None and wpm >= stat_wlimit
             if too_fast and not self.fast_flagged:
                 self.fast_flagged = True
                 self.fast_episodes += 1
                 if wlimit and self.cfg.get("alert", {}).get("flash_on_filler", True):
                     self.flash_color = ACCENT
                     self.flash_until = now + 0.8
-            elif wpm < 0.85 * stat_wlimit:
-                self.fast_flagged = False
+            elif wpm is None or wpm < 0.9 * stat_wlimit:
+                self.fast_flagged = False   # slowed down (or stopped): re-arm
             if talking:
                 talk = now - self.speech_start
                 if talk >= stat_limit and not self.run_flagged:
@@ -1180,8 +1438,8 @@ def run_overlay(config, echo=False, dock=False):
             limit = airtime_limit(self.cfg)
             wlimit = pace_limit(self.cfg)
             med = statistics.median(self.turns) if self.turns else None
-            talk = self.spoken_seconds
-            avg_wpm = round(self.words_total * 60.0 / talk) if talk >= PACE_MIN_SPAN else None
+            avg = self._call_pace()
+            avg_wpm = round(avg) if avg else None
             write_session({
                 "id": self.session_id,
                 "name": self.session_name,
@@ -1202,6 +1460,65 @@ def run_overlay(config, echo=False, dock=False):
                 "buckets": self.graph.buckets,
                 "bucket_seconds": self.graph.bucket_seconds,
             })
+
+        @objc.python_method
+        def _reset_pace(self):
+            self.pace_words = []        # (start, end) monotonic, your final words
+            self.pace_partial = []      # ...of the utterance still being recognized
+            self.pace_words_total = 0   # call average = words / talking time
+            self.pace_span_total = 0.0
+            self.pace_last_end = None
+            self.live_pace = 0.0
+
+        @objc.python_method
+        def _add_pace_words(self, spans):
+            for s, e in spans:
+                self.pace_words_total += 1
+                self.pace_span_total += max(0.0, e - s)
+                last = self.pace_last_end
+                if last is not None and 0 < s - last <= PACE_PAUSE_MAX:
+                    self.pace_span_total += s - last
+                self.pace_last_end = e if last is None else max(last, e)
+            self.pace_words += spans
+            cutoff = time.monotonic() - 120
+            self.pace_words = [w for w in self.pace_words if w[1] >= cutoff]
+
+        @objc.python_method
+        def _live_pace(self):
+            """0.0 = you've stopped talking (idle); None = talking but too
+            little since your last long pause to measure yet."""
+            words = self.pace_words + self.pace_partial
+            if not words:
+                return 0.0
+            mnow = time.monotonic()
+            if mnow - max(e for _, e in words[-8:]) > LIVE_IDLE:
+                return 0.0              # you've stopped: drop to 0, don't decay
+            window = float(self.cfg.get("pace", {}).get("window_seconds", 10))
+            return live_wpm(words, window)
+
+        @objc.python_method
+        def _call_pace(self):
+            if self.pace_span_total < CALL_MIN_SPAN:
+                return None
+            return self.pace_words_total * 60.0 / self.pace_span_total
+
+        @objc.python_method
+        def _show_pace(self, limit=None):
+            limit = limit or float(self.cfg.get("pace", {}).get("relaxed_wpm", 190))
+            wpm = self.live_pace
+
+            def color(v):
+                return ACCENT if v >= limit else AMBER if v >= 0.85 * limit else OK
+            if wpm:
+                self.wpm_lbl.setStringValue_(f"{int(round(wpm))} wpm now")
+                self.wpm_lbl.setTextColor_(color(wpm))
+            else:   # 0 = not talking; None = just started, measuring
+                self.wpm_lbl.setStringValue_(
+                    "0 wpm now" if wpm is not None else "… wpm now")
+                self.wpm_lbl.setTextColor_(DIM)
+            avg = self._call_pace()
+            self.avg_lbl.setStringValue_(f"avg {int(round(avg))} wpm" if avg else "avg —")
+            self.avg_lbl.setTextColor_(color(avg) if avg else DIM)
 
         @objc.python_method
         def _end_turn(self):
@@ -1260,11 +1577,9 @@ def run_overlay(config, echo=False, dock=False):
             self.turns = []
             self.long_turns = 0
             self.run_flagged = False
-            self.word_times = []
-            self.spoken_seconds = 0.0
             self.fast_episodes = 0
             self.fast_flagged = False
-            self.last_wpm = 0.0
+            self._reset_pace()
             self.elapsed_accum = 0.0
             self.active_since = time.time()
             self.speech_start = None
@@ -1273,8 +1588,7 @@ def run_overlay(config, echo=False, dock=False):
             self.total_lbl.setStringValue_("0")
             self.score_lbl.setStringValue_("—")
             self.score_lbl.setTextColor_(DIM)
-            self.wpm_lbl.setStringValue_("— wpm")
-            self.wpm_lbl.setTextColor_(DIM)
+            self._show_pace()
             self._refresh_words()
 
         def quit_(self, sender):
@@ -1355,8 +1669,8 @@ def run_overlay(config, echo=False, dock=False):
                 NSMakeRect(210, y - 4, 170, 26), False)
             ppop.addItemsWithTitles_([
                 "Off",
-                f"Relaxed (over {int(pace.get('relaxed_wpm', 220))} wpm)",
-                f"Strict (over {int(pace.get('strict_wpm', 180))} wpm)",
+                f"Relaxed (over {int(pace.get('relaxed_wpm', 190))} wpm)",
+                f"Strict (over {int(pace.get('strict_wpm', 170))} wpm)",
             ])
             ppop.selectItemAtIndex_({"off": 0, "relaxed": 1, "strict": 2}.get(
                 pace.get("mode", "relaxed"), 1))
@@ -1387,16 +1701,16 @@ def run_overlay(config, echo=False, dock=False):
             y -= 36
             ec = NSButton.alloc().initWithFrame_(NSMakeRect(20, y, SW - 40, 22))
             ec.setButtonType_(NSButtonTypeSwitch)
-            ec.setTitle_("Echo cancellation — don't count voices from my speakers")
+            ec.setTitle_("Don't count voices from my speakers")
             ec.setState_(1 if self.cfg.get("echo_cancel", True) else 0)
             v.addSubview_(ec)
             self.cb_ec = ec
             y -= 26
             label(v, 38, y, SW - 58, 16, 11, NSColor.secondaryLabelColor(),
-                  text="macOS lowers other audio a little while this runs (like FaceTime).")
+                  text="Skips words heard while your Mac plays sound. Mic untouched.")
             y -= 28
             label(v, 20, y, SW - 40, 16, 11, NSColor.secondaryLabelColor(),
-                  text="With headphones you can turn it off for full audio quality.")
+                  text="Asks for System Audio Recording once. Off is fine with headphones.")
 
             button(v, SW - 190, 14, 80, "Cancel", self, b"closeSettings:")
             button(v, SW - 100, 14, 80, "Save", self, b"saveSettings:")
@@ -1624,7 +1938,11 @@ def run_overlay(config, echo=False, dock=False):
                 self._apply({"um": 2, "like": 1})   # give the UI real content
                 now = time.time()                   # ...and a fast talking turn
                 self.speech_start, self.last_speech = now - 12, now
-                self.word_times = [(now - 9, 30, 6.0), (now - 2, 30, 6.0)]
+                m = time.monotonic()            # 40 words over the last 10 s
+                self._add_pace_words([(m - 10 + i * 0.25, m - 10 + i * 0.25 + 0.2)
+                                      for i in range(40)])
+                self.pace_span_total = 20.0     # pretend a longer call for the avg
+                self.pace_words_total = 55
             elif step in (1, 3):
                 v = self.panel.contentView()
                 rep = v.bitmapImageRepForCachingDisplayInRect_(v.bounds())
@@ -1682,16 +2000,37 @@ def run_overlay(config, echo=False, dock=False):
                 now = time.time()
                 self.speech_start = now - 10
                 self.last_speech = now
-                self.word_times = [(now - 8, 25, 5.0), (now - 3, 25, 5.0)]
+                m = time.monotonic()            # 16 s at 300 wpm (call avg needs 15 s)
+                self._add_pace_words([(m - 16 + i * 0.2, m - 16 + i * 0.2 + 0.15)
+                                      for i in range(80)])
                 self.tick_(None)
-                assert self.last_wpm >= 250, f"wpm not computed: {self.last_wpm}"
+                assert self.live_pace and self.live_pace >= 250, \
+                    f"wpm not computed: {self.live_pace}"
                 assert "SLOW DOWN" in str(self.air_lbl.stringValue()), \
                     f"pace alarm missing: {self.air_lbl.stringValue()}"
                 assert self.fast_episodes == 1, self.fast_episodes
                 self.tick_(None)
                 assert self.fast_episodes == 1, "episode double-counted"
-                assert "wpm" in str(self.wpm_lbl.stringValue()) and \
+                assert "wpm now" in str(self.wpm_lbl.stringValue()) and \
                     "—" not in str(self.wpm_lbl.stringValue()), "wpm label blank"
+                assert "avg" in str(self.avg_lbl.stringValue()) and \
+                    "—" not in str(self.avg_lbl.stringValue()), "call average blank"
+                # stop talking: live pace goes idle within LIVE_IDLE, alarm clears
+                self.pace_words = [(a - LIVE_IDLE - 6, b - LIVE_IDLE - 6)
+                                   for a, b in self.pace_words]
+                self.last_speech = now - 3      # turn over too
+                self.tick_(None)
+                assert self.live_pace == 0, f"pace not idle: {self.live_pace}"
+                assert "0 wpm now" == str(self.wpm_lbl.stringValue()), self.wpm_lbl.stringValue()
+                # restart slowly after the pause: the fast stretch must not count
+                m = time.monotonic()
+                self._add_pace_words([(m - 6 + i * 0.5, m - 6 + i * 0.5 + 0.3)
+                                      for i in range(12)])
+                self.tick_(None)
+                assert self.live_pace and self.live_pace < 140, \
+                    f"pre-pause words leaked into live pace: {self.live_pace}"
+                assert "SLOW DOWN" not in str(self.air_lbl.stringValue()), "alarm stuck"
+                assert not self.fast_flagged, "fast flag not re-armed"
                 self.cfg["pace"]["mode"] = "off"
             elif step == 7:
                 # trigger auto-end: meaningful session + fake long silence
@@ -1763,7 +2102,7 @@ def run_overlay(config, echo=False, dock=False):
     app_menu.addItem_(NSMenuItem.separatorItem())
     mitem("Settings…", b"openSettings:", ",")
     mitem("Session History…", b"openHistory:", "y")
-    ec_item = mitem("Echo Cancellation", b"toggleEchoCancel:", "")
+    ec_item = mitem("Ignore Speaker Audio", b"toggleEchoCancel:", "")
     ec_item.setState_(1 if config.get("echo_cancel", True) else 0)
     controller.ec_item = ec_item
     app_menu.addItem_(NSMenuItem.separatorItem())
@@ -1812,7 +2151,10 @@ def main():
         list_devices()
         return
 
-    run_overlay(load_config(), echo=args.echo, dock=args.dock)
+    # FILLER_KILLER_ECHO=1 turns on --echo for the .app, whose launcher
+    # passes no arguments (e.g. `open --env FILLER_KILLER_ECHO=1 --stdout log`)
+    echo = args.echo or os.environ.get("FILLER_KILLER_ECHO") == "1"
+    run_overlay(load_config(), echo=echo, dock=args.dock)
 
 
 if __name__ == "__main__":

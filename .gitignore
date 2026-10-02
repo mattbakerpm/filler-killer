@@ -15,3 +15,6 @@ FillerKiller.app/
 
 # local task board (not part of the open-source project)
 BACKLOG.json
+
+# speaker-gate helper, built from fk-systap.swift by run.sh
+/fk-systap

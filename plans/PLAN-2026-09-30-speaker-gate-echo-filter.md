@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-30 |
-| **Status** | In Progress — updated as work progresses |
+| **Status** | Complete |
 | **Project** | filler-killer |
 | **Backlog Card ID** | fc13 (BACKLOG.json, status doing until release ships) |
 
@@ -96,9 +96,10 @@ call. We still want "no headphones needed, remote voices not counted".
 
 | Turn / Date | What changed |
 |---|---|
-| | |
+| 2026-10-01 | Matt's first live call still had the soft-voice problem — diagnostic showed `voice-processing (echo cancel)`: he'd launched the old v1.6.0 from /Applications (Dock), not the project-folder test build. Installed the test build to /Applications (`make_app.sh --install`); a second call worked. Lesson: always install test builds where the user actually launches from. |
+| 2026-10-02 | Release. Found v1.6.0's launcher was built arm64-only with minos 27.0 (swiftc defaults to the build host) — it couldn't open on macOS 13–26 or Intel, despite the cask's `:ventura`. make_app.sh now builds launcher + helper universal with explicit `-target …-macos14.0` / `14.2` (embedded Python needs 14.0). Cask → `depends_on macos: ">= :sonoma"`. Committed 65cf9e6, tagged v1.7.0, signed, notarized (accepted first try), GitHub release, cask bumped (tap 6c51b09), `brew upgrade` on Matt's Mac. |
 
 ## Result
-Code complete and verified in a local build. Remaining: tag v1.7.0, signed
-build + notarize, GitHub release, cask sha bump — awaiting Matt's go-ahead
-(outward-facing). Then Status → Complete, card fc13 → done.
+**Status:** Complete
+**Backlog card:** fc13 moved to Done
+**Notes:** Shipped as v1.7.0 (https://github.com/mattbakerpm/filler-killer/releases/tag/v1.7.0) together with the live pace readout. Verified on a real Teams-in-Chrome call (Matt: "worked"). Gotcha: during `brew upgrade`, an FK instance that launched mid-install logged "speaker gate unavailable: helper not found"; the relaunched app had the helper running normally.

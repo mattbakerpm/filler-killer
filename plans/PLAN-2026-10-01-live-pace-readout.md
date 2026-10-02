@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-10-01 |
-| **Status** | In Progress — updated as work progresses |
+| **Status** | Complete |
 | **Project** | filler-killer |
 | **Backlog Card ID** | fc14 (BACKLOG.json) |
 
@@ -90,4 +90,6 @@ Root causes:
 | 2026-10-01 — "multi-second pause should reset to zero" | `live_wpm` now starts the window after the most recent gap > PACE_PAUSE_MAX (2 s), so pre-pause words never blend into "now" (unit check: 302 wpm → 4 s pause → 120 wpm stretch reads 124, not a blend). Idle shows **"0 wpm now"** (was "—"); "… wpm now" while warming up after a restart (< 6 words or < LIVE_MIN_SPAN 3 s). `_live_pace` returns 0.0 idle / None warming. Exercise extended with the restart case; EXERCISE OK. |
 
 ## Result
-Code complete and verified offline + in the local test build; awaiting Matt's real-voice check, then ships with v1.7.0 (release pending his go-ahead).
+**Status:** Complete
+**Backlog card:** fc14 moved to Done
+**Notes:** Shipped in v1.7.0 (2026-10-02) with the speaker gate; Matt tested the build on a real call before release. Follow-up ideas (not done): pace-over-time graph, per-user calibration.
